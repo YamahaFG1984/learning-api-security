@@ -1,0 +1,1216 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章：自包含 Token 与 JWT · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+<style>
+  .compare-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 13.5px; }
+  .compare-table th, .compare-table td { border: 1px solid var(--border, #2a3142); padding: 8px 10px; text-align: left; vertical-align: top; }
+  .compare-table th { background: var(--code-bg, #161b26); }
+  .compare-table td.good { color: #16a34a; font-weight: 600; }
+  .compare-table td.bad { color: #dc2626; font-weight: 600; }
+  .compare-table td.mid { color: #d97706; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">6.1 把 token 状态存在客户端</a>
+      <a href="#s2">6.2 JSON Web Token</a>
+      <a href="#s3">6.3 加密敏感属性</a>
+      <a href="#s4">6.4 用类型系统做安全设计</a>
+      <a href="#s5">6.5 处理 token 撤销</a>
+      <a href="#s6">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 6 章</span>
+    <h1>自包含 Token 与 JWT</h1>
+    <p class="subtitle">Natter 的用户涨到了几百万，数据库里那张 token 表快扛不住了——这一章教你怎么把"谁登录了、什么时候过期"这些状态直接塞进 token 本身，让服务器不用再查库就能验证身份，以及这么做要付出什么安全代价。</p>
+
+    <p>
+      第 5 章里，Natter 用的是<strong>数据库 token</strong>：登录时服务器生成一个随机 ID，存进数据库，
+      再把这个 ID 作为 token 发给客户端。以后每次请求，服务器都要拿着这个 ID 去数据库里查一遍，
+      看看这个 token 是谁的、有没有过期、有没有被撤销。这就像去健身房办了张会员卡——卡本身只是一串编号，
+      前台每次都要刷卡查电脑里的会员记录才知道你是谁、卡还有没有效。
+    </p>
+    <p>
+      这一章要讲的<strong>自包含 token（self-contained token）</strong>换了个思路：与其让服务器每次都去
+      "查电脑"，不如直接把会员信息（姓名、到期日）印在卡面上，再用防伪水印保证没人能改。服务器拿到卡，
+      看一眼卡面、验一下水印，就知道这张卡是不是真的、有没有过期，完全不用联网查库。这正是 JWT
+      （JSON Web Token，读作 "jot"）要解决的问题。但"把数据印在卡面上"也带来了新麻烦：卡片本身可能被偷看
+      （信息泄露），卡片一旦发出去就很难作废（撤销困难）。这一章会带你一步步实现自包含 token，
+      并且看清楚它到底在用什么换什么。
+    </p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 JWT</div>
+      <p>
+        JSON Web Token（JWT）是一种标准化的自包含安全 token 格式。它把一组关于用户的"声明"
+        （claims，比如用户名、过期时间）编码成一个 JSON 对象，再加上一个描述格式的 header，
+        整体用密码学手段防篡改（还可以加密）。因为是标准，几乎所有编程语言都有现成的 JWT 库，
+        很多 Web 框架也内置了对它的支持。
+      </p>
+    </div>
+
+    <h2 id="s1"><span class="num">6.1</span>把 token 状态存在客户端</h2>
+    <p>
+      自包含 token 的核心想法很简单：不把 token 的状态（用户名、过期时间等）存进数据库，
+      而是直接把这些字段序列化成一个 JSON 对象，再做 Base64url 编码，编码结果本身就是 token ID。
+      服务器收到 token 后，只要解码、解析 JSON，就能拿回这次会话的所有属性，完全不用查库。
+    </p>
+    <p>
+      本章项目里的 <code>JsonTokenStore</code> 就是这么干的：用短字段名节省空间，比如
+      <code>sub</code> 表示 subject（用户名）、<code>exp</code> 表示过期时间——这两个字段名不是随便起的，
+      正是 6.2 节要讲的 JWT 标准字段。
+    </p>
+
+    <div class="callout danger">
+      <div class="title">⚠️ 光有 Base64 编码，等于没上锁</div>
+      <p>
+        Base64 只是编码，不是加密，更不是签名——任何人都能解码看到内容，也能任意修改后重新编码。
+        如果 <code>JsonTokenStore</code> 单独使用，攻击者登录一次拿到自己的 token 后，
+        照样能在浏览器里把 <code>{"sub":"alice",...}</code> 改成 <code>{"sub":"admin",...}</code>，
+        再重新 Base64 编码发回去——服务器会照单全收。甚至不需要登录，攻击者可以凭空编一个 token。
+      </p>
+    </div>
+
+    <pre class="plain"><code>// 一个尚未加保护的 JSON token 解码后长这样：
+{"sub":"test","exp":1559582129,"attrs":{}}</code></pre>
+
+    <h3 id="s1-1">6.1.1 用 HMAC 保护 JSON token</h3>
+    <p>
+      解决办法并不新鲜：复用第 5 章为数据库 token 写的 <code>HmacTokenStore</code>。
+      服务器用一把只有自己知道的密钥，对编码后的 JSON 算一个 HMAC 认证标签（authentication tag），
+      拼在 token 后面。客户端可以看到、也可以照抄这个 token，但改不出一个能通过验证的新标签——
+      因为算标签需要密钥，而密钥从来没有离开过服务器。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 680 300" role="img" aria-label="HMAC 保护 JSON token 的流程">
+        <defs>
+          <marker id="arrow1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="20" width="220" height="40" rx="8" fill="#7c3aed"/>
+        <text x="130" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">① JSON claims（明文）</text>
+        <text x="130" y="18" text-anchor="middle" fill="#1c2333" font-size="11.5">sub=test, exp=12345, attrs={}</text>
+
+        <rect x="30" y="100" width="200" height="30" rx="6" fill="#e2e5ee"/>
+        <text x="130" y="120" text-anchor="middle" fill="#1c2333" font-size="12" font-family="monospace">eyJzdWIiOiJ0ZXN0Iiwu...</text>
+        <text x="130" y="90" text-anchor="middle" fill="#1c2333" font-size="11.5">② URL-safe Base64 编码</text>
+
+        <line x1="130" y1="60" x2="130" y2="98" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+
+        <rect x="420" y="95" width="150" height="40" rx="8" fill="#d97706"/>
+        <text x="495" y="112" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">HMAC-SHA256</text>
+        <text x="495" y="127" text-anchor="middle" fill="#fff" font-size="10.5">用服务器密钥</text>
+
+        <line x1="230" y1="115" x2="418" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="320" y="105" text-anchor="middle" fill="#1c2333" font-size="11.5">③ 计算认证标签</text>
+
+        <rect x="450" y="170" width="180" height="30" rx="6" fill="#e2e5ee"/>
+        <text x="540" y="190" text-anchor="middle" fill="#1c2333" font-size="12" font-family="monospace">f9d9d851dca5...</text>
+        <line x1="495" y1="135" x2="530" y2="168" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="600" y="155" text-anchor="middle" fill="#1c2333" font-size="11.5">④ Base64url 编码</text>
+
+        <rect x="60" y="240" width="560" height="40" rx="8" fill="#16a34a"/>
+        <text x="340" y="265" text-anchor="middle" fill="#fff" font-size="12" font-family="monospace">eyJzdWIiOiJ0ZXN0Iiwu.dnYUdylHgTGpNcv39ol...</text>
+        <line x1="130" y1="130" x2="200" y2="238" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <line x1="540" y1="200" x2="480" y2="238" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="340" y="228" text-anchor="middle" fill="#1c2333" font-size="11.5">⑤ 用 "." 拼接：编码内容 + 编码标签 = 最终 token</text>
+      </svg>
+      <figcaption>图 6-1：HMAC 认证标签基于编码后的 JSON 内容计算，再拼在 token 尾部。"." 不是合法的 Base64 字符，正好用来定位标签。</figcaption>
+    </figure>
+
+    <div class="callout note">
+      <div class="title">💡 HMAC 到底防住了什么</div>
+      <p>
+        HMAC（Hash-based Message Authentication Code）是一种带密钥的哈希算法。验证时服务器用同一把密钥
+        对拿到的 token 内容重新算一遍标签，和 token 里带的标签做<strong>恒定时间比较</strong>——
+        只要有一位不一样就拒绝。这能防住"伪造 token"（spoofing）和"篡改 token"（tampering），
+        但注意：它<strong>不加密</strong>，任何人拿到 token 都能直接 Base64 解码看到里面的明文内容。
+      </p>
+    </div>
+
+    <p>要开启这套保护，只需要把 <code>DatabaseTokenStore</code> 换成 <code>JsonTokenStore</code>，再用 <code>HmacTokenStore</code> 包一层：</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch06/src/main/java/com/manning/apisecurityinaction/token/JsonTokenStore.java（节选）+ Main.java 装配代码</div>
+        <pre><code>public class JsonTokenStore implements TokenStore {
+    @Override
+    public String create(Request request, Token token) {
+        var json = new JSONObject();
+        json.put("sub", token.username);
+        json.put("exp", token.expiry.getEpochSecond());
+        json.put("attrs", token.attributes);
+
+        var jsonBytes = json.toString().getBytes(UTF_8);
+        return Base64url.encode(jsonBytes);   // 只编码，还没签名
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        try {
+            var decoded = Base64url.decode(tokenId);
+            var json = new JSONObject(new String(decoded, UTF_8));
+            var expiry = Instant.ofEpochSecond(json.getInt("exp"));
+            var username = json.getString("sub");
+            var attrs = json.getJSONObject("attrs");
+
+            var token = new Token(expiry, username);
+            for (var key : attrs.keySet()) {
+                token.attributes.put(key, attrs.getString(key));
+            }
+            return Optional.of(token);
+        } catch (JSONException e) {
+            return Optional.empty();
+        }
+    }
+}
+
+// Main.java：用 HmacTokenStore 包一层，防止篡改
+TokenStore tokenStore = new JsonTokenStore();
+tokenStore = HmacTokenStore.wrap(tokenStore, macKey);
+var tokenController = new TokenController(tokenStore);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/json_store.py（教学示例，用标准库 hmac + itsdangerous 思路）</div>
+        <pre><code>import base64, hashlib, hmac, json, time
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+def b64url_decode(s: str) -> bytes:
+    padding = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + padding)
+
+MAC_KEY = settings.HMAC_SECRET_KEY  # 32 字节随机密钥，存在环境变量里
+
+def create_token(username: str, expiry: int, attrs: dict) -> str:
+    payload = {"sub": username, "exp": expiry, "attrs": attrs}
+    body = b64url_encode(json.dumps(payload).encode())
+    tag = hmac.new(MAC_KEY, body.encode(), hashlib.sha256).digest()
+    return f"{body}.{b64url_encode(tag)}"
+
+def read_token(token: str) -> dict | None:
+    try:
+        body, tag_b64 = token.rsplit(".", 1)
+        expected = hmac.new(MAC_KEY, body.encode(), hashlib.sha256).digest()
+        provided = b64url_decode(tag_b64)
+        if not hmac.compare_digest(expected, provided):  # 恒定时间比较
+            return None
+        payload = json.loads(b64url_decode(body))
+        if payload["exp"] < time.time():
+            return None
+        return payload
+    except Exception:
+        return None</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/jsonStore.ts（教学示例，用 Node crypto）</div>
+        <pre><code>import { createHmac, timingSafeEqual } from "node:crypto";
+
+const MAC_KEY = process.env.HMAC_SECRET_KEY!; // 32 字节随机密钥
+
+function b64url(buf: Buffer) {
+  return buf.toString("base64url");
+}
+
+export function createToken(sub: string, exp: number, attrs: object) {
+  const body = b64url(Buffer.from(JSON.stringify({ sub, exp, attrs })));
+  const tag = createHmac("sha256", MAC_KEY).update(body).digest();
+  return `${body}.${b64url(tag)}`;
+}
+
+export function readToken(token: string) {
+  const [body, tagB64] = token.split(".");
+  if (!body || !tagB64) return null;
+
+  const expected = createHmac("sha256", MAC_KEY).update(body).digest();
+  const provided = Buffer.from(tagB64, "base64url");
+  if (expected.length !== provided.length ||
+      !timingSafeEqual(expected, provided)) {
+    return null; // 篡改或伪造
+  }
+  const payload = JSON.parse(Buffer.from(body, "base64url").toString());
+  if (payload.exp < Date.now() / 1000) return null;
+  return payload;
+}</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s2"><span class="num">6.2</span>JSON Web Token</h2>
+    <p>
+      上面手写的 "HMAC + JSON" 方案，其实就是一个简化版的 JWT。JWT 在 2015 年被标准化，
+      在此基础上加了三样东西：一个描述算法等元数据的标准 <strong>header</strong>；一组含义固定的
+      <strong>标准 claims</strong>（比如 <code>exp</code>、<code>sub</code>）；以及一大堆可选的签名 / 加密算法。
+      因为是标准，几乎每种语言都有现成的库，很多网关、认证服务器、SDK 都能直接读懂 JWT——
+      第 7 章要讲的 OpenID Connect 就是用 JWT 来传递用户身份的。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 200" role="img" aria-label="JWT 的三段结构">
+        <rect x="20" y="60" width="190" height="60" rx="8" fill="#0891b2"/>
+        <text x="115" y="86" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Header</text>
+        <text x="115" y="104" text-anchor="middle" fill="#fff" font-size="10.5">{"alg":"HS256"}</text>
+
+        <rect x="250" y="60" width="190" height="60" rx="8" fill="#7c3aed"/>
+        <text x="345" y="86" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Payload（claims）</text>
+        <text x="345" y="104" text-anchor="middle" fill="#fff" font-size="10.5">{"sub":"test","exp":...}</text>
+
+        <rect x="480" y="60" width="200" height="60" rx="8" fill="#16a34a"/>
+        <text x="580" y="86" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Signature</text>
+        <text x="580" y="104" text-anchor="middle" fill="#fff" font-size="10.5">HMAC 或数字签名</text>
+
+        <text x="230" y="95" text-anchor="middle" fill="#1c2333" font-size="20" font-weight="700">.</text>
+        <text x="460" y="95" text-anchor="middle" fill="#1c2333" font-size="20" font-weight="700">.</text>
+
+        <text x="115" y="45" text-anchor="middle" fill="#1c2333" font-size="11.5">用哪种算法签名？</text>
+        <text x="345" y="45" text-anchor="middle" fill="#1c2333" font-size="11.5">关于用户的一组声明</text>
+        <text x="580" y="45" text-anchor="middle" fill="#1c2333" font-size="11.5">对前两段计算得到</text>
+
+        <text x="350" y="150" text-anchor="middle" fill="#5b6478" font-size="12" font-family="monospace">eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0Ii4uLn0.nMxLeSG6pmrPOhRSNKF4v3...</text>
+        <text x="350" y="175" text-anchor="middle" fill="#1c2333" font-size="12">三段各自做 URL-safe Base64 编码，用 "." 连接，即 JWS Compact Serialization</text>
+      </svg>
+      <figcaption>图 6-2：一个签名 JWT 由 header、payload、signature 三段组成，中间用 "." 分隔。header 和 payload 只是编码，不是加密——任何人都能直接解码看到内容。</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ JOSE header 是个"雷区"</div>
+      <p>
+        JOSE（JSON Object Signing and Encryption，JWT 所依赖的标准家族）把"用什么算法验证"这个决定，
+        写在了 header 里由发送方自己声明——这违反了"永远不要信任未经验证的声明"这条基本原则，
+        因为你必须先读 header 才能知道怎么验证，可读 header 本身还没被验证过。
+        2015 年安全研究员 Tim McLean 就发现很多 JWT 库存在漏洞：攻击者可以把 <code>alg</code> 改成
+        <code>none</code>，库就直接跳过签名验证！更安全的做法是把算法和密钥绑定存在服务器上
+        （<strong>key-driven cryptographic agility</strong>），而不是相信 token 自己说的算法。
+        Nimbus 库通过要求你显式传入 <code>JWSVerifier</code> 对应的算法，从设计上堵住了这个漏洞。
+      </p>
+    </div>
+
+    <h3 id="s2-1">6.2.1 标准 JWT claims</h3>
+    <p>为了跨系统互通，JWT 定义了一组三字母的标准字段：</p>
+    <table>
+      <thead><tr><th>Claim</th><th>名称</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td><code>iss</code></td><td>Issuer</td><td>谁签发了这个 JWT，通常是认证服务的 URI</td></tr>
+        <tr><td><code>aud</code></td><td>Audience</td><td>这个 JWT 是给谁用的（一个或一组 API 的标识），接收方必须检查自己在不在列表里</td></tr>
+        <tr><td><code>iat</code></td><td>Issued-At</td><td>签发时间</td></tr>
+        <tr><td><code>nbf</code></td><td>Not-Before</td><td>在此时间之前无效</td></tr>
+        <tr><td><code>exp</code></td><td>Expiry</td><td>过期时间，过期后必须拒绝</td></tr>
+        <tr><td><code>sub</code></td><td>Subject</td><td>这个 token 是关于谁的，通常是用户名</td></tr>
+        <tr><td><code>jti</code></td><td>JWT ID</td><td>唯一 ID，可用于检测重放（replay）</td></tr>
+      </tbody>
+    </table>
+    <p>
+      其中只有 <code>iss</code>、<code>iat</code>、<code>sub</code> 是在陈述事实，其余字段都是在给"这个 token
+      能怎么用"设限制，目的是防<strong>重放攻击（replay attack）</strong>：攻击者截获一个合法 token，
+      过后拿去重放，冒充发送者。设置较短的 <code>exp</code> 能缩小重放的时间窗口；<code>aud</code> 和
+      <code>iss</code> 能防止 token 被拿去别的 API 上重放，或者被"反射"回签发者自己（reflection attack）。
+    </p>
+
+    <h3 id="s2-2">6.2.2 生成并校验标准 JWT</h3>
+    <p>
+      本章开始用真正的 JWT 库——<strong>Nimbus JOSE + JWT</strong>（Apache 2.0 协议的成熟 Java 库）。
+      签发时用 <code>JWSSigner</code> 计算签名，校验时用 <code>JWSVerifier</code>；两者都要配合具体的
+      <code>JWSAlgorithm</code>（比如 HMAC-SHA256 对应 <code>HS256</code>）一起使用，并且始终显式传入
+      要校验的 <code>audience</code>，确保这个 JWT 就是签给你这个 API 的。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch06/src/main/java/com/manning/apisecurityinaction/token/SignedJwtTokenStore.java（节选）</div>
+        <pre><code>public class SignedJwtTokenStore implements TokenStore {
+    private final JWSSigner signer;
+    private final JWSVerifier verifier;
+    private final JWSAlgorithm algorithm;
+    private final String audience;
+
+    @Override
+    public String create(Request request, Token token) {
+        var claimsSet = new JWTClaimsSet.Builder()
+                .subject(token.username)
+                .audience(audience)
+                .expirationTime(Date.from(token.expiry))
+                .claim("attrs", token.attributes)
+                .build();
+
+        var header = new JWSHeader(JWSAlgorithm.HS256);
+        var jwt = new SignedJWT(header, claimsSet);
+        try {
+            jwt.sign(signer);
+            return jwt.serialize();
+        } catch (JOSEException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        try {
+            var jwt = SignedJWT.parse(tokenId);
+            if (!jwt.verify(verifier)) {
+                throw new JOSEException("Invalid signature");
+            }
+            var claims = jwt.getJWTClaimsSet();
+            if (!claims.getAudience().contains(audience)) {
+                throw new JOSEException("Incorrect audience");
+            }
+            var expiry = claims.getExpirationTime().toInstant();
+            var subject = claims.getSubject();
+            var token = new Token(expiry, subject);
+            var attrs = claims.getJSONObjectClaim("attrs");
+            attrs.forEach((key, value) ->
+                    token.attributes.put(key, (String) value));
+            return Optional.of(token);
+        } catch (ParseException | JOSEException e) {
+            return Optional.empty(); // 从不暴露失败原因
+        }
+    }
+}
+
+// Main.java 装配：
+var algorithm = JWSAlgorithm.HS256;
+var signer = new MACSigner((SecretKey) macKey);
+var verifier = new MACVerifier((SecretKey) macKey);
+TokenStore tokenStore = new SignedJwtTokenStore(
+        signer, verifier, algorithm, "https://localhost:4567");</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/jwt_store.py（djangorestframework-simplejwt 风格，或直接用 pyjwt）</div>
+        <pre><code>import jwt  # PyJWT
+import time
+
+SECRET = settings.JWT_HMAC_SECRET  # 与 HMAC 方案共用一把对称密钥
+AUDIENCE = "https://api.natter.example"
+ALGORITHM = "HS256"
+
+def create_jwt(username: str, expiry_ts: int, attrs: dict) -> str:
+    claims = {
+        "sub": username,
+        "aud": AUDIENCE,
+        "exp": expiry_ts,
+        "attrs": attrs,
+    }
+    # PyJWT 会自动生成 header {"alg": "HS256", "typ": "JWT"}
+    return jwt.encode(claims, SECRET, algorithm=ALGORITHM)
+
+def read_jwt(token: str) -> dict | None:
+    try:
+        # 显式声明只接受 HS256，防止 alg 混淆攻击；显式校验 audience
+        claims = jwt.decode(
+            token, SECRET, algorithms=[ALGORITHM], audience=AUDIENCE,
+        )
+        return claims
+    except jwt.InvalidTokenError:
+        return None  # 签名无效 / 过期 / audience 不对，统一返回失败
+
+# 如果用 djangorestframework-simplejwt，则在 settings.py 里配置：
+# SIMPLE_JWT = {
+#     "ALGORITHM": "HS256",
+#     "AUDIENCE": "https://api.natter.example",
+#     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=10),
+# }
+# 并把 DEFAULT_AUTHENTICATION_CLASSES 指向 JWTAuthentication</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/sessions.ts（用 hono/jwt，也可以换成更灵活的 jose 库）</div>
+        <pre><code>import { Hono } from "hono";
+import { sign, verify } from "hono/jwt";
+
+const AUDIENCE = "https://api.natter.example";
+const SECRET = process.env.JWT_HMAC_SECRET!; // 与 HMAC 方案共用密钥
+
+const app = new Hono();
+
+app.post("/sessions", basicAuthMiddleware, async (c) => {
+  const username = c.get("username");
+  const exp = Math.floor(Date.now() / 1000) + 600; // 10 分钟
+
+  const token = await sign(
+    { sub: username, aud: AUDIENCE, exp, attrs: {} },
+    SECRET,
+    "HS256",
+  );
+  return c.json({ token });
+});
+
+// 校验中间件：拒绝时不解释具体原因
+app.use("/spaces/*", async (c, next) => {
+  const auth = c.req.header("Authorization") ?? "";
+  const token = auth.replace(/^Bearer /, "");
+  try {
+    const claims = await verify(token, SECRET, "HS256");
+    if (claims.aud !== AUDIENCE) throw new Error("bad audience");
+    c.set("subject", claims.sub);
+  } catch {
+    return c.text("invalid token", 401);
+  }
+  await next();
+});</code></pre>
+      </div>
+    </div>
+
+    <p>
+      用 <a href="https://jwt.io" target="_blank" rel="noopener">jwt.io</a> 的调试器可以直观地看到一个 JWT
+      解码后的 header 和 claims——但切记：JWT 本身就是凭证，永远不要把生产环境的 JWT 或密钥粘贴到任何第三方网站上。
+    </p>
+
+    <h2 id="s3"><span class="num">6.3</span>加密敏感属性</h2>
+    <p>
+      数据库放在数据中心里，有防火墙和门禁保护，相对安全。可一旦把状态挪到客户端，
+      token 里的任何个人信息——姓名、生日、职位、工作地点——都可能因为 token 泄露、被钓鱼、
+      或者被 XSS 偷走而暴露。有些属性甚至需要对用户本人保密（比如暴露了 API 内部实现细节的字段）。
+      这时候只签名不够了，还得加密。
+    </p>
+
+    <div class="callout note">
+      <div class="title">💡 分组密码与工作模式</div>
+      <p>
+        AES（Advanced Encryption Standard）是目前最主流的加密算法，属于<strong>分组密码（block
+        cipher）</strong>：一次只能加密固定大小（16 字节）的一块数据。要加密更长的数据，需要选一种
+        <strong>工作模式（mode of operation）</strong>把多个分组拼起来。模式选错了后果很严重——
+        书里举了个经典例子（"ECB 企鹅"）：用不安全的 ECB 模式加密一张图片，企鹅的轮廓在密文里依然清晰可见；
+        换成 CTR 模式，密文就变成完全看不出规律的噪声。
+      </p>
+    </div>
+
+    <h3 id="s3-1">6.3.1 认证加密：光加密还不够</h3>
+    <p>
+      很多加密算法只保证<strong>机密性</strong>（别人读不到），不保证<strong>完整性</strong>
+      （别人改不了）。举个例子：如果你知道一个用 CTR 模式加密的 token 解密后是
+      <code>user=brian</code> 开头，即使你解不开密文，也能通过"翻转比特"的方式，
+      把它改成解密后是 <code>user=admin</code>——这就是密码学里说的<strong>选择密文攻击
+      （chosen ciphertext attack）</strong>。用 STRIDE 模型来说：单纯加密防的是"信息泄露"，
+      防不住"伪造"和"篡改"。
+    </p>
+
+    <div class="callout danger">
+      <div class="title">🕵️ 反面教材：UnauthenticatedEncryptionStore</div>
+      <p>
+        项目源码里专门留了一个 <code>UnauthenticatedEncryptionStore</code> 类，用 AES/CTR 模式加密
+        token，但<strong>没有</strong>做任何完整性校验。它存在的唯一目的是给你演示"只加密不认证"有多危险——
+        文档注释里明确写着"应该用 <code>EncryptedTokenStore</code> 或 <code>EncryptedJwtTokenStore</code>
+        代替它"。永远不要在生产代码里单独使用纯加密方案。
+      </p>
+    </div>
+
+    <p>正确做法是使用<strong>认证加密（authenticated encryption）</strong>：把加密算法和 MAC 算法组合起来，
+    同时保证机密性和完整性。</p>
+
+    <table>
+      <thead><tr><th>方案</th><th>机密性（防偷看）</th><th>完整性（防篡改/伪造）</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>只签名（HMAC / 签名 JWT）</td>
+          <td class="mid" style="color:#d97706">✗ 任何人可解码明文</td>
+          <td class="good">✓ 无法伪造或篡改</td>
+          <td>适合公开信息的 token，不能放敏感字段</td>
+        </tr>
+        <tr>
+          <td>只加密（如未认证的 AES/CTR）</td>
+          <td class="good">✓ 无密钥读不到明文</td>
+          <td class="bad">✗ 可被选择密文攻击篡改</td>
+          <td><strong>反面教材，不要单独使用</strong></td>
+        </tr>
+        <tr>
+          <td>认证加密 / AEAD（NaCl SecretBox、AES-GCM、JWE）</td>
+          <td class="good">✓ 无密钥读不到明文</td>
+          <td class="good">✓ 篡改会被检测</td>
+          <td><strong>推荐方案</strong>：机密性 + 完整性一步到位</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 260" role="img" aria-label="三种保护方案对比">
+        <rect x="20" y="30" width="200" height="70" rx="8" fill="#16a34a"/>
+        <text x="120" y="58" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">只签名（HMAC/JWS）</text>
+        <text x="120" y="76" text-anchor="middle" fill="#fff" font-size="11">明文可读，防篡改</text>
+        <text x="120" y="92" text-anchor="middle" fill="#fff" font-size="11">👁 攻击者能看到内容</text>
+
+        <rect x="250" y="30" width="200" height="70" rx="8" fill="#dc2626"/>
+        <text x="350" y="58" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">只加密（无认证）</text>
+        <text x="350" y="76" text-anchor="middle" fill="#fff" font-size="11">看不到内容，但能篡改</text>
+        <text x="350" y="92" text-anchor="middle" fill="#fff" font-size="11">🔧 选择密文攻击</text>
+
+        <rect x="480" y="30" width="200" height="70" rx="8" fill="#0891b2"/>
+        <text x="580" y="58" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">认证加密 / AEAD</text>
+        <text x="580" y="76" text-anchor="middle" fill="#fff" font-size="11">看不到内容，也不能改</text>
+        <text x="580" y="92" text-anchor="middle" fill="#fff" font-size="11">✓ 推荐</text>
+
+        <rect x="120" y="150" width="460" height="90" rx="8" fill="none" stroke="#5b6478" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <text x="350" y="175" text-anchor="middle" fill="#1c2333" font-size="12.5" font-weight="600">Encrypt-then-MAC（EtM）</text>
+        <text x="350" y="196" text-anchor="middle" fill="#1c2333" font-size="11.5">先用 AES 加密，再对密文计算 HMAC ——顺序不能反</text>
+        <text x="350" y="214" text-anchor="middle" fill="#1c2333" font-size="11.5">专用 AEAD 模式（如 GCM）把这两步合并成一步，更不容易用错</text>
+        <text x="350" y="232" text-anchor="middle" fill="#1c2333" font-size="11.5">NaCl SecretBox / JWE A128CBC-HS256 都是这类方案的现成实现</text>
+      </svg>
+      <figcaption>图 6-3：只签名会泄露内容，只加密可能被篡改，只有"认证加密"（AEAD）同时保证机密性和完整性——这是本章最终推荐的方案。</figcaption>
+    </figure>
+
+    <h3 id="s3-2">6.3.2 用 NaCl 做认证加密</h3>
+    <p>
+      密码学细节很容易出错，所以近年来的趋势是用<strong>高层封装库</strong>把这些细节藏起来。
+      最有名的就是 Daniel Bernstein 设计的 <strong>NaCl</strong>（读作 "salt"）。本章用它的纯 Java 实现
+      <strong>Salty Coffee</strong>，核心是 <code>SecretBox</code> 类——一行代码做认证加密，一行代码解密验证。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch06/src/main/java/com/manning/apisecurityinaction/token/EncryptedTokenStore.java</div>
+        <pre><code>public class EncryptedTokenStore implements TokenStore {
+    private final TokenStore delegate;
+    private final Key encryptionKey;
+
+    @Override
+    public String create(Request request, Token token) {
+        var tokenId = delegate.create(request, token);
+        return SecretBox.encrypt(encryptionKey, tokenId).toString();
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        var box = SecretBox.fromString(tokenId);
+        var originalTokenId = box.decryptToString(encryptionKey);
+        return delegate.read(request, originalTokenId);
+    }
+
+    @Override
+    public void revoke(Request request, String tokenId) {
+        var box = SecretBox.fromString(tokenId);
+        var originalTokenId = box.decryptToString(encryptionKey);
+        delegate.revoke(request, originalTokenId);
+    }
+}
+
+// Main.java 装配：加密密钥必须和 HMAC 密钥分开生成、分开保管
+var naclKey = SecretBox.key(encKey.getEncoded());
+var tokenStore = new EncryptedTokenStore(new JsonTokenStore(), naclKey);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/encrypted_store.py（用 cryptography 库的 AESGCM，标准 AEAD 实现）</div>
+        <pre><code>import os, json
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+# 256-bit 密钥，与 HMAC/签名密钥分开保存（专钥专用原则）
+ENC_KEY = settings.AES_GCM_KEY  # 32 字节
+aesgcm = AESGCM(ENC_KEY)
+
+def encrypt_token(inner_token_id: str) -> str:
+    nonce = os.urandom(12)  # 96-bit nonce，绝不能重用
+    ciphertext = aesgcm.encrypt(nonce, inner_token_id.encode(), None)
+    # GCM 的 ciphertext 已经内含认证标签
+    return b64url_encode(nonce) + "." + b64url_encode(ciphertext)
+
+def decrypt_token(token: str) -> str | None:
+    try:
+        nonce_b64, ct_b64 = token.split(".")
+        nonce = b64url_decode(nonce_b64)
+        ciphertext = b64url_decode(ct_b64)
+        plaintext = aesgcm.decrypt(nonce, ciphertext, None)  # 篡改会抛异常
+        return plaintext.decode()
+    except Exception:
+        return None  # 从不透露具体失败原因，防止 padding oracle 之类的信息泄露</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/encryptedStore.ts（Web Crypto API 的 AES-GCM）</div>
+        <pre><code>const ENC_KEY = await crypto.subtle.importKey(
+  "raw",
+  Buffer.from(process.env.AES_GCM_KEY!, "base64"), // 256-bit 密钥
+  "AES-GCM",
+  false,
+  ["encrypt", "decrypt"],
+);
+
+export async function encryptToken(innerTokenId: string): Promise<string> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12)); // 绝不重用
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce },
+    ENC_KEY,
+    new TextEncoder().encode(innerTokenId),
+  );
+  return `${b64url(nonce)}.${b64url(new Uint8Array(ciphertext))}`;
+}
+
+export async function decryptToken(token: string): Promise<string | null> {
+  try {
+    const [nonceB64, ctB64] = token.split(".");
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: b64urlDecode(nonceB64) },
+      ENC_KEY,
+      b64urlDecode(ctB64), // GCM 篡改会让 decrypt 直接抛异常
+    );
+    return new TextDecoder().decode(plaintext);
+  } catch {
+    return null; // 统一失败提示
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s3-3">6.3.3 加密的 JWT（JWE）</h3>
+    <p>
+      NaCl 的 <code>SecretBox</code> 简单又安全，但它的编码格式不是标准，只适合"自产自销"——
+      同一个 API 自己签发、自己校验。如果 token 要被多个团队、多种语言写的服务共享，标准格式就更有价值，
+      这就是 JOSE 里的 <strong>JSON Web Encryption（JWE）</strong>。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 170" role="img" aria-label="JWE 的五段结构">
+        <rect x="10" y="60" width="120" height="50" rx="6" fill="#0891b2"/>
+        <text x="70" y="90" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Header</text>
+        <rect x="145" y="60" width="120" height="50" rx="6" fill="#7c3aed"/>
+        <text x="205" y="82" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">加密的 Key</text>
+        <text x="205" y="97" text-anchor="middle" fill="#fff" font-size="10">（direct 模式下为空）</text>
+        <rect x="280" y="60" width="120" height="50" rx="6" fill="#d97706"/>
+        <text x="340" y="90" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">IV / nonce</text>
+        <rect x="415" y="60" width="120" height="50" rx="6" fill="#16a34a"/>
+        <text x="475" y="90" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">密文</text>
+        <rect x="550" y="60" width="130" height="50" rx="6" fill="#2563eb"/>
+        <text x="615" y="90" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">认证标签</text>
+
+        <text x="70" y="45" text-anchor="middle" fill="#1c2333" font-size="10.5">enc/alg 算法</text>
+        <text x="205" y="45" text-anchor="middle" fill="#1c2333" font-size="10.5">复杂密钥协商用</text>
+        <text x="340" y="45" text-anchor="middle" fill="#1c2333" font-size="10.5">每次加密都不同</text>
+        <text x="475" y="45" text-anchor="middle" fill="#1c2333" font-size="10.5">加密后的 claims</text>
+        <text x="615" y="45" text-anchor="middle" fill="#1c2333" font-size="10.5">防篡改</text>
+
+        <text x="350" y="140" text-anchor="middle" fill="#5b6478" font-size="11.5" font-family="monospace">header.加密key.IV.密文.标签   （5 段，用 4 个 "." 分隔）</text>
+        <text x="350" y="158" text-anchor="middle" fill="#1c2333" font-size="11">本章用 alg=dir（直接用对称密钥），enc=A128CBC-HS256（AES-CBC + HMAC，即 EtM）</text>
+      </svg>
+      <figcaption>图 6-4：JWE Compact Serialization 由 5 段组成，比 JWS 多了"加密 key"和"IV"两段，最后一段仍是认证标签。</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ GCM 的 nonce 千万不能重复</div>
+      <p>
+        JOSE 目前提供两类认证加密算法：<code>A128GCM</code> 等（AES-GCM）和 <code>A128CBC-HS256</code>
+        等（AES-CBC + HMAC，即 Encrypt-then-MAC）。GCM 速度快，但如果同一个密钥下 nonce 重复了一次，
+        攻击者就能反推出 MAC 密钥，之后可以随意伪造 token——后果是灾难性的。本书作者更偏好直接加密场景下用
+        CBC+HMAC 组合，因为 nonce 复用的容错性更好；但如果每次加密都能保证生成全新的随机 nonce（比如
+        Web Crypto、AESGCM 库默认都是这样），GCM 依然是又快又好的选择。
+      </p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch06/src/main/java/com/manning/apisecurityinaction/token/EncryptedJwtTokenStore.java（节选）</div>
+        <pre><code>public class EncryptedJwtTokenStore implements TokenStore {
+    private final SecretKey encKey;
+
+    @Override
+    public String create(Request request, Token token) {
+        var claimsBuilder = new JWTClaimsSet.Builder()
+                .subject(token.username)
+                .audience("https://localhost:4567")
+                .expirationTime(Date.from(token.expiry));
+        token.attributes.forEach(claimsBuilder::claim);
+
+        var header = new JWEHeader(JWEAlgorithm.DIR,
+                EncryptionMethod.A128CBC_HS256);
+        var jwt = new EncryptedJWT(header, claimsBuilder.build());
+        try {
+            var encrypter = new DirectEncrypter(encKey);
+            jwt.encrypt(encrypter);
+        } catch (JOSEException e) {
+            throw new RuntimeException(e);
+        }
+        return jwt.serialize();
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        try {
+            var jwt = EncryptedJWT.parse(tokenId);
+            var decryptor = new DirectDecrypter(encKey);
+            jwt.decrypt(decryptor);   // 解密同时验证认证标签
+
+            var claims = jwt.getJWTClaimsSet();
+            if (!claims.getAudience().contains("https://localhost:4567")) {
+                return Optional.empty();
+            }
+            var expiry = claims.getExpirationTime().toInstant();
+            var token = new Token(expiry, claims.getSubject());
+            // ... 提取其余自定义 claim
+            return Optional.of(token);
+        } catch (ParseException | JOSEException e) {
+            return Optional.empty(); // 绝不透露解密失败的具体原因
+        }
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/encrypted_jwt.py（用 jwcrypto 库，Python 里最贴近 Nimbus 语义的 JOSE 实现）</div>
+        <pre><code>from jwcrypto import jwe, jwt as jwcrypto_jwt, jwk
+import json, time
+
+# JWK 格式的对称密钥，alg 元数据和密钥绑在一起（key-driven agility）
+ENC_KEY = jwk.JWK(kty="oct", k=b64url_encode(settings.AES_KEY_BYTES))
+
+def create_encrypted_jwt(username: str, exp: int, attrs: dict) -> str:
+    claims = {
+        "sub": username,
+        "aud": "https://api.natter.example",
+        "exp": exp,
+        **attrs,
+    }
+    token = jwcrypto_jwt.JWT(
+        header={"alg": "dir", "enc": "A128CBC-HS256"},
+        claims=claims,
+    )
+    token.make_encrypted_token(ENC_KEY)
+    return token.serialize()
+
+def read_encrypted_jwt(token_str: str) -> dict | None:
+    try:
+        token = jwcrypto_jwt.JWT(key=ENC_KEY, jwt=token_str)
+        claims = json.loads(token.claims)
+        if claims.get("aud") != "https://api.natter.example":
+            return None
+        if claims.get("exp", 0) < time.time():
+            return None
+        return claims
+    except Exception:
+        return None  # 不区分"格式错误"和"认证失败"，防止 padding oracle</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/encryptedJwt.ts（用 jose 库的 EncryptJWT / jwtDecrypt）</div>
+        <pre><code>import { EncryptJWT, jwtDecrypt } from "jose";
+
+const ENC_KEY = Buffer.from(process.env.AES_DIRECT_KEY!, "base64"); // 16 字节 = A128CBC-HS256 所需
+
+export async function createEncryptedJwt(
+  username: string, exp: number, attrs: Record&lt;string, unknown&gt;,
+) {
+  return await new EncryptJWT({ ...attrs })
+    .setProtectedHeader({ alg: "dir", enc: "A128CBC-HS256" })
+    .setSubject(username)
+    .setAudience("https://api.natter.example")
+    .setExpirationTime(exp)
+    .encrypt(ENC_KEY);
+}
+
+export async function readEncryptedJwt(token: string) {
+  try {
+    const { payload } = await jwtDecrypt(token, ENC_KEY, {
+      audience: "https://api.natter.example",
+    });
+    return payload; // jwtDecrypt 内部已校验认证标签、exp、aud
+  } catch {
+    return null; // 统一失败，不暴露具体原因
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ 小结：三种保护方式怎么选</div>
+      <p>
+        只需要"防篡改、内容可以公开" → 签名 JWT（JWS/HS256）就够了；只要 token 里有一丁点
+        用户不该看到、或者攻击者能利用的信息，就必须上认证加密（NaCl SecretBox、AES-GCM 或 JWE）。
+        <strong>永远不要单独使用不带认证的加密</strong>——这不是"更弱一点"的安全，而是"看起来安全实际上不安全"，
+        比明文更危险，因为它会让人误以为数据是安全的。
+      </p>
+    </div>
+
+    <h2 id="s4"><span class="num">6.4</span>用类型系统做安全的 API 设计</h2>
+    <p>
+      本章目前为止的设计是"kit of parts"（零件套装）风格：<code>HmacTokenStore</code>、
+      <code>EncryptedTokenStore</code> 这些类都可以任意组合、互相包裹。这样固然灵活，
+      但也很危险——只要有人不小心在 <code>Main.java</code> 里把 <code>EncryptedTokenStore</code>
+      这层包装注释掉，加密和完整性保护就都没了，代码却照样能编译通过、照样能跑。
+    </p>
+    <div class="callout tip">
+      <div class="title">🔒 原则：让不安全的代码写不出来</div>
+      <p>
+        安全的 API 设计不应该只是"能写出安全代码"，而应该"很难写出不安全的代码"——因为开发者总会犯错。
+      </p>
+    </div>
+    <p>
+      解决办法是引入<strong>标记接口（marker interface）</strong>：一个不定义任何新方法、纯粹用来
+      表达"这个实现具备某种安全属性"的接口。项目里定义了 <code>ConfidentialTokenStore</code>（保证机密性）、
+      <code>AuthenticatedTokenStore</code>（保证不可篡改），再组合出一个
+      <code>SecureTokenStore</code>（两者都满足）。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 280" role="img" aria-label="用标记接口表达安全属性">
+        <rect x="270" y="20" width="160" height="46" rx="8" fill="#2563eb"/>
+        <text x="350" y="48" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">TokenStore</text>
+        <text x="350" y="10" text-anchor="middle" fill="#1c2333" font-size="11">create() / read() / revoke()</text>
+
+        <rect x="90" y="120" width="220" height="46" rx="8" fill="#7c3aed"/>
+        <text x="200" y="148" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">ConfidentialTokenStore</text>
+        <rect x="390" y="120" width="220" height="46" rx="8" fill="#0891b2"/>
+        <text x="500" y="148" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">AuthenticatedTokenStore</text>
+
+        <line x1="350" y1="66" x2="200" y2="118" stroke="#5b6478" stroke-width="1.5"/>
+        <line x1="350" y1="66" x2="500" y2="118" stroke="#5b6478" stroke-width="1.5"/>
+
+        <rect x="240" y="210" width="220" height="46" rx="8" fill="#16a34a"/>
+        <text x="350" y="238" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">SecureTokenStore</text>
+
+        <line x1="200" y1="166" x2="330" y2="208" stroke="#5b6478" stroke-width="1.5"/>
+        <line x1="500" y1="166" x2="370" y2="208" stroke="#5b6478" stroke-width="1.5"/>
+
+        <text x="350" y="270" text-anchor="middle" fill="#1c2333" font-size="11">TokenController 的构造函数只接受 SecureTokenStore ——传别的类型编译不过</text>
+      </svg>
+      <figcaption>图 6-5：标记接口把"机密性"和"完整性"表达成类型。只有同时满足两者的实现才是 <code>SecureTokenStore</code>，<code>TokenController</code> 在构造函数里强制要求这个类型，插错组件会直接编译失败。</figcaption>
+    </figure>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch06/.../ConfidentialTokenStore.java, AuthenticatedTokenStore.java, SecureTokenStore.java, HmacTokenStore.java（节选）</div>
+        <pre><code>public interface ConfidentialTokenStore extends TokenStore { }
+public interface AuthenticatedTokenStore extends TokenStore { }
+public interface SecureTokenStore
+        extends ConfidentialTokenStore, AuthenticatedTokenStore { }
+
+// HmacTokenStore 用私有构造函数 + 两个静态工厂方法，
+// 根据传入的委托类型，静态地决定返回值类型：
+public class HmacTokenStore implements SecureTokenStore {
+    private HmacTokenStore(TokenStore delegate, Key macKey) { ... }
+
+    // 传入已经保密的 store → 返回值同时满足保密+认证 = SecureTokenStore
+    public static SecureTokenStore wrap(ConfidentialTokenStore store, Key macKey) {
+        return new HmacTokenStore(store, macKey);
+    }
+    // 传入普通 store → 只能保证认证，不保证保密
+    public static AuthenticatedTokenStore wrap(TokenStore store, Key macKey) {
+        return new HmacTokenStore(store, macKey);
+    }
+}
+
+// TokenController 的构造函数强制要求 SecureTokenStore：
+public TokenController(SecureTokenStore tokenStore) {
+    this.tokenStore = tokenStore;
+}
+// 传入一个裸的 JsonTokenStore？编译直接报错，而不是运行时才暴雷。</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/interfaces.py（Python 没有静态类型强制，用 Protocol + mypy 做"尽力而为"的近似）</div>
+        <pre><code>from typing import Protocol, runtime_checkable
+
+class TokenStore(Protocol):
+    def create(self, request, token) -> str: ...
+    def read(self, request, token_id: str) -> dict | None: ...
+    def revoke(self, request, token_id: str) -> None: ...
+
+@runtime_checkable
+class ConfidentialTokenStore(TokenStore, Protocol):
+    """标记：保证 token 内容不会被无密钥的人读到。"""
+
+@runtime_checkable
+class AuthenticatedTokenStore(TokenStore, Protocol):
+    """标记：保证 token 不能被伪造或篡改。"""
+
+class SecureTokenStore(ConfidentialTokenStore, AuthenticatedTokenStore, Protocol):
+    """两者兼备，才是 TokenController 允许使用的类型。"""
+
+class TokenController:
+    def __init__(self, token_store: SecureTokenStore):
+        # mypy 静态检查能挡住大部分误用；
+        # 运行时可以再加一道 isinstance 断言兜底
+        assert isinstance(token_store, SecureTokenStore)
+        self.token_store = token_store</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/types.ts（TypeScript 的名义类型不如 Java，常用"品牌类型"技巧模拟标记接口）</div>
+        <pre><code>interface TokenStore {
+  create(req: Request, token: TokenData): Promise&lt;string&gt;;
+  read(req: Request, tokenId: string): Promise&lt;TokenData | null&gt;;
+  revoke(req: Request, tokenId: string): Promise&lt;void&gt;;
+}
+
+// TS 是结构类型系统，普通接口挡不住误传；
+// 用一个不会被结构匹配的"品牌"字段模拟 Java 的标记接口
+declare const CONFIDENTIAL: unique symbol;
+declare const AUTHENTICATED: unique symbol;
+
+interface ConfidentialTokenStore extends TokenStore { readonly [CONFIDENTIAL]: true; }
+interface AuthenticatedTokenStore extends TokenStore { readonly [AUTHENTICATED]: true; }
+interface SecureTokenStore extends ConfidentialTokenStore, AuthenticatedTokenStore {}
+
+// 只有显式声明实现了这两个品牌接口的类，才能被当作 SecureTokenStore 传入
+class TokenController {
+  constructor(private tokenStore: SecureTokenStore) {}
+}
+// 传一个只实现 TokenStore 的普通对象？tsc 编译报类型错误。</code></pre>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <div class="title">💡 反面教材小档案</div>
+      <p>
+        项目里的 <code>UnauthenticatedEncryptionStore</code> 只实现了 <code>ConfidentialTokenStore</code>
+        （因为它确实加密了，但没有认证），<code>JsonTokenStore</code> 只实现最基础的 <code>TokenStore</code>
+        （既不保密也不认证），<code>SignedJwtTokenStore</code> 只实现 <code>AuthenticatedTokenStore</code>
+        （只签名不加密）。这些类型标注本身就是一份精确的"安全属性文档"，代码审查时一眼就能看出每个组件到底提供了什么保证。
+      </p>
+    </div>
+
+    <h2 id="s5"><span class="num">6.5</span>处理 token 撤销</h2>
+    <p>
+      自包含 token 最大的软肋，就是<strong>撤销（revocation）</strong>。数据库 token 撤销很简单——删一行记录就行；
+      自包含 token 的状态全在客户端手里，服务器根本没地方"删"。
+    </p>
+    <p>常见的几种应对思路：</p>
+    <ul>
+      <li><strong>不管它</strong>：如果 token 本来就短命、API 也不涉及敏感数据，可以干脆不支持主动登出。但这适用范围很窄。</li>
+      <li><strong>allowlist（白名单）</strong>：数据库里存一份"有效 token ID"列表，撤销时删掉对应记录；每次校验都要查一遍数据库确认 token 还在名单里。</li>
+      <li><strong>blocklist（黑名单）</strong>：反过来，只在撤销时往数据库里加一条记录；平时校验只要确认没在黑名单里就行，条目在 token 过期后即可清理。</li>
+      <li><strong>按属性批量撤销</strong>：比如用户改密码时，让"这之前签发的所有 token"统统失效——只需要记一条"某用户在某时间点之前的 token 全部作废"，不用一条条记。</li>
+      <li><strong>短有效期 + 强制重新登录</strong>：牺牲一点用户体验换取安全性，第 7 章会讲 OAuth2 的 refresh token 如何优雅地实现这个模式。</li>
+    </ul>
+
+    <div class="callout danger">
+      <div class="title">📰 真实案例：Facebook 2018 年 9000 万 token 事件</div>
+      <p>
+        2018 年 9 月，Facebook 因为一处 token 处理漏洞遭到攻击，事后不得不紧急撤销 9000 万个 access
+        token，强制这些用户重新登录。如果当时用的是纯无状态 JWT、完全没有撤销机制，这次应急响应根本无法执行——
+        这正是"纯自包含 token 看似解放了数据库，实则丢掉了应急能力"的活教材。
+      </p>
+    </div>
+
+    <h3 id="s5-1">6.5.1 混合 token：自包含 + 一个可撤销的短 ID</h3>
+    <p>
+      本章给出的推荐方案是<strong>混合 token（hybrid token）</strong>：JWT 里大部分字段仍然自包含，
+      但额外塞一个数据库生成的 <code>jti</code>（JWT ID），这个 ID 对应数据库里的一行"allowlist"记录。
+      平时校验时先解密验证 JWT 本身的签名/加密（不查库），再拿 <code>jti</code> 去数据库确认它还没被撤销
+      （查一次库，但只查主键，很快）。这样既保留了"部分信息不用查库就能用"的优势，
+      又拿回了"随时能立即撤销"的能力——鱼与熊掌兼得。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 320" role="img" aria-label="混合 token 校验流程">
+        <defs>
+          <marker id="arrow2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="20" width="130" height="40" rx="8" fill="#2563eb"/>
+        <text x="85" y="45" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">客户端</text>
+
+        <rect x="290" y="20" width="140" height="40" rx="8" fill="#16a34a"/>
+        <text x="360" y="45" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">Natter API</text>
+
+        <rect x="560" y="20" width="120" height="40" rx="8" fill="#7c3aed"/>
+        <text x="620" y="45" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">Token 数据库</text>
+
+        <line x1="85" y1="60" x2="85" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="360" y1="60" x2="360" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="620" y1="60" x2="620" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="95" y1="90" x2="350" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="225" y="82" text-anchor="middle" fill="#1c2333" font-size="11.5">① 登录</text>
+
+        <line x1="370" y1="115" x2="610" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="490" y="107" text-anchor="middle" fill="#1c2333" font-size="11.5">② 生成一条 allowlist 记录，得到短 ID</text>
+
+        <line x1="360" y1="145" x2="105" y2="145" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="225" y="137" text-anchor="middle" fill="#1c2333" font-size="11.5">③ 把短 ID 塞进 JWT 的 jti，签名/加密后整体返回</text>
+
+        <line x1="95" y1="180" x2="350" y2="180" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="225" y="172" text-anchor="middle" fill="#1c2333" font-size="11.5">④ 带着 JWT 访问受保护资源</text>
+
+        <line x1="370" y1="205" x2="610" y2="205" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="490" y="197" text-anchor="middle" fill="#1c2333" font-size="11.5">⑤ 只查 jti 是否还在 allowlist 里（主键查询，很快）</text>
+
+        <line x1="620" y1="230" x2="380" y2="230" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="500" y="222" text-anchor="middle" fill="#1c2333" font-size="11.5">⑥ 存在 → 有效；不存在 → 已撤销</text>
+
+        <text x="360" y="260" text-anchor="middle" fill="#5b6478" font-size="11.5">用户登出 / 改密码时：</text>
+        <line x1="370" y1="275" x2="610" y2="275" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="490" y="267" text-anchor="middle" fill="#dc2626" font-size="11.5">删除对应的 allowlist 记录 → JWT 立即失效</text>
+      </svg>
+      <figcaption>图 6-6：混合 token 把"要不要撤销这个用户的会话"这个决定权留在服务器，同时用户名、过期时间等大部分字段仍然自包含、不用查库就能读取。</figcaption>
+    </figure>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch06/.../EncryptedJwtTokenStore.java（加上 DatabaseTokenStore 做 allowlist 后的版本，节选）</div>
+        <pre><code>public class EncryptedJwtTokenStore implements SecureTokenStore {
+    private final SecretKey encKey;
+    private final DatabaseTokenStore tokenAllowlist;
+
+    @Override
+    public String create(Request request, Token token) {
+        // 数据库里只存一条"空壳"记录，换回一个短 ID
+        var allowlistToken = new Token(token.expiry, token.username);
+        var jwtId = tokenAllowlist.create(request, allowlistToken);
+
+        var claimsBuilder = new JWTClaimsSet.Builder()
+                .jwtID(jwtId)                       // 把短 ID 塞进标准的 jti claim
+                .subject(token.username)
+                .audience("https://localhost:4567")
+                .expirationTime(Date.from(token.expiry));
+        token.attributes.forEach(claimsBuilder::claim);
+
+        var header = new JWEHeader(JWEAlgorithm.DIR, EncryptionMethod.A128CBC_HS256);
+        var jwt = new EncryptedJWT(header, claimsBuilder.build());
+        var encrypter = new DirectEncrypter(encKey);
+        jwt.encrypt(encrypter);
+        return jwt.serialize();
+    }
+
+    @Override
+    public void revoke(Request request, String tokenId) {
+        var jwt = EncryptedJWT.parse(tokenId);
+        jwt.decrypt(new DirectDecrypter(encKey));   // 先验证 JWT 本身没被篡改
+        var claims = jwt.getJWTClaimsSet();
+        tokenAllowlist.revoke(request, claims.getJWTID());   // 再删数据库记录
+    }
+
+    // read() 里额外加一步：
+    // if (tokenAllowlist.read(request, claims.getJWTID()).isEmpty())
+    //     return Optional.empty();   // jti 不在库里 = 已撤销</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/models.py + hybrid_store.py（Django 模型存 jti 白名单）</div>
+        <pre><code># tokens/models.py
+import uuid
+from django.db import models
+
+class AllowlistedToken(models.Model):
+    jti = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    username = models.CharField(max_length=150)
+    expiry = models.DateTimeField()
+    # 撤销 = 直接删除这一行
+
+# tokens/hybrid_store.py
+def create_hybrid_jwt(username: str, expiry) -> str:
+    record = AllowlistedToken.objects.create(username=username, expiry=expiry)
+    return create_encrypted_jwt(  # 复用 6.3.3 节的加密 JWT 实现
+        username=username,
+        exp=int(expiry.timestamp()),
+        attrs={"jti": str(record.jti)},
+    )
+
+def read_hybrid_jwt(token: str) -> dict | None:
+    claims = read_encrypted_jwt(token)
+    if claims is None:
+        return None
+    jti = claims.get("jti")
+    # 只做主键查询，非常快；不存在 = 已撤销
+    if not AllowlistedToken.objects.filter(pk=jti).exists():
+        return None
+    return claims
+
+def revoke_hybrid_jwt(token: str) -> None:
+    claims = read_encrypted_jwt(token)  # 先验证签名/加密，防止越权撤销别人的 token
+    if claims and "jti" in claims:
+        AllowlistedToken.objects.filter(pk=claims["jti"]).delete()
+
+# 改密码时批量撤销某用户全部 token：
+# AllowlistedToken.objects.filter(username=user.username).delete()</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/hybridStore.ts（用 Redis 存 jti 白名单，撤销即 DEL）</div>
+        <pre><code>import { randomUUID } from "node:crypto";
+import { redis } from "../lib/redis"; // ioredis 客户端
+
+export async function createHybridJwt(username: string, expirySec: number) {
+  const jti = randomUUID();
+  const ttl = expirySec - Math.floor(Date.now() / 1000);
+  // allowlist：存在 = 有效；用 TTL 让记录跟 token 一起自然过期
+  await redis.set(`token:${jti}`, username, "EX", Math.max(ttl, 1));
+
+  return await createEncryptedJwt(username, expirySec, { jti }); // 复用 6.3.3 节实现
+}
+
+export async function readHybridJwt(token: string) {
+  const claims = await readEncryptedJwt(token);
+  if (!claims || !claims.jti) return null;
+
+  const exists = await redis.exists(`token:${claims.jti}`);
+  if (!exists) return null; // 不在 allowlist 里 = 已撤销
+  return claims;
+}
+
+export async function revokeHybridJwt(token: string) {
+  const claims = await readEncryptedJwt(token); // 先验证签名/加密
+  if (claims?.jti) await redis.del(`token:${claims.jti}`);
+}
+
+// 改密码时批量撤销：给每个用户维护一个 SET 存所有 jti，
+// 改密码时遍历该 SET 逐个 DEL，或记录一个 "早于此时间戳的 token 全部作废" 的标记</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ allowlist 混合方案的三个额外好处</div>
+      <p>
+        1) 一旦发生 Facebook 那样的安全事件，能立即批量撤销所有 token，而不用干等到期；<br>
+        2) 就算数据库被拖库，攻击者拿到的也只是一堆随机 ID，伪造不出新 token（因为伪造还需要过 JWT
+        的签名/加密校验）；<br>
+        3) 可以按敏感程度把字段分配到 JWT 或数据库——用户基本信息放 JWT 省一次查库，
+        像"最后活跃时间"这种频繁变化、用于空闲超时判断的字段则放数据库。
+      </p>
+    </div>
+
+    <h2 id="s6">本章小结</h2>
+    <table>
+      <thead><tr><th>机制</th><th>解决什么问题</th><th>本章对应的类</th></tr></thead>
+      <tbody>
+        <tr><td>把状态编码进 JSON + Base64url</td><td>去掉查数据库的开销</td><td><code>JsonTokenStore</code></td></tr>
+        <tr><td>HMAC / 签名 JWT（JWS）</td><td>防止 token 被伪造或篡改</td><td><code>HmacTokenStore</code>、<code>SignedJwtTokenStore</code></td></tr>
+        <tr><td>认证加密（AEAD）/ 加密 JWT（JWE）</td><td>防止客户端读到或篡改敏感字段</td><td><code>EncryptedTokenStore</code>（NaCl）、<code>EncryptedJwtTokenStore</code>（JWE）</td></tr>
+        <tr><td>只加密不认证（反例）</td><td>——展示为什么这样不安全</td><td><code>UnauthenticatedEncryptionStore</code></td></tr>
+        <tr><td>标记接口</td><td>用类型系统防止误用不安全的组合</td><td><code>ConfidentialTokenStore</code> / <code>AuthenticatedTokenStore</code> / <code>SecureTokenStore</code></td></tr>
+        <tr><td>混合 token（allowlist）</td><td>让自包含 token 也能被立即撤销</td><td>带 <code>DatabaseTokenStore</code> 的 <code>EncryptedJwtTokenStore</code></td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li>自包含 token 用 JSON 编码状态、Base64url 转成字符串，天然可以省掉数据库查询，但也天然不安全，必须加认证保护。</li>
+      <li>JWT/JOSE 是这套思路的标准化版本，好处是生态成熟，坏处是"kit of parts"设计给了攻击者可乘之机（比如 <code>alg</code> header 混淆攻击）——应该优先信任与密钥绑定的算法，而不是 token 自己声明的算法。</li>
+      <li>敏感字段必须用认证加密（AEAD）保护，绝不能只加密不认证；NaCl SecretBox 和 JWE 都是现成、可靠的选择。</li>
+      <li>用标记接口这类类型系统技巧，能把"这个组件是否安全"从人工审查变成编译器检查。</li>
+      <li>纯无状态 token 撤销困难，混合方案（JWT + 数据库 allowlist 存 jti）在绝大多数场景下是最稳妥的默认选择。</li>
+    </ul>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch05/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 5 章：现代化的基于 Token 的认证</span></a>
+      <a class="next" href="../ch07/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 7 章：OAuth2 与 OpenID Connect →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

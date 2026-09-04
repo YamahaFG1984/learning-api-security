@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 12 章：保护物联网通信 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">12.1 传输层安全：把 TLS 搬到 UDP 上</a>
+      <a href="#s2">12.2 预共享密钥（PSK）</a>
+      <a href="#s3">12.3 端到端安全</a>
+      <a href="#s4">12.4 密钥分发与管理</a>
+      <a href="#s5">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 12 章</span>
+    <h1>保护物联网通信</h1>
+    <p class="subtitle">当 API 的另一端不再是数据中心里的服务器，而是散落在田间地头、靠电池供电的传感器时，安全该怎么做？</p>
+
+    <p>前面十一章讲的所有 API，客户端和服务器基本都跑在体面的环境里：机房有门禁，电脑有像样的
+    CPU 和内存，网络是可靠的 TCP。这一章要换一个场景——物联网（IoT，Internet of Things）设备。
+    想象一下：一个装在灌溉阀门上的湿度传感器，靠一颗纽扣电池撑一年，芯片内存以 KB 计算（不是
+    GB），常年放在没人看守的野外，通过低功耗无线（比如蓝牙 BLE）把数据发给附近的网关，网关再转
+    成 MQTT 消息发到云端，云端再转成一次 HTTP 请求写进数据库。这条链路上，我们熟悉的"直接对着
+    服务器建一条 HTTPS 连接"根本不存在——设备资源不够跑标准 TLS 的那套证书验证逻辑，网络本身
+    也不是可靠的 TCP，而且消息中途要经过好几个网关，每一跳都可能是攻击者的切入点。这一章要解决
+    两个问题：<strong>怎么在这样的设备上做传输层加密</strong>（也就是 DTLS 和预共享密钥），以及
+    <strong>怎么让加密"穿透"中间那些网关</strong>，做到只有真正的接收方才能看懂消息内容（也就是
+    端到端安全）。最后再聊聊这些资源受限的设备要怎么管理、分发和更新它们的密钥。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是"受限设备"（constrained device）</div>
+      <p>受限设备是指 CPU、内存、网络带宽或电力明显弱于一台普通服务器甚至智能手机的设备——内存
+      可能只有几十 KB，而不是几 GB。RFC 7228 专门定义了这类设备的分级。本章的很多设计取舍，
+      根源都是"这段代码要能塞进一颗几毛钱的芯片里，还要尽量少费电"。</p>
+    </div>
+
+    <h2 id="s1"><span class="num">12.1</span>传输层安全：把 TLS 搬到 UDP 上</h2>
+
+    <p>普通 Web API 几乎都建立在 TCP 之上：TCP 负责保证字节按顺序、不丢失地到达，TLS 在这之上
+    加一层加密和身份验证。但 TCP 对受限设备并不友好：</p>
+    <ul>
+      <li>TCP 协议栈本身代码量不小，在寸土寸金的设备闪存里是笔不小的开销；</li>
+      <li>TCP 的可靠性要求发送方把消息缓存起来，直到收到确认——这对内存本就紧张的设备是负担，
+      而且很多传感器数据是"实时流"，丢了一条重发也没意义，新数据很快就会覆盖它；</li>
+      <li>TCP 报文头至少 16 字节，对本来只有几个字节的传感器读数来说，这个开销占比高得离谱；</li>
+      <li>TCP 不支持组播，没法一次把消息发给一大批设备；</li>
+      <li>设备为了省电经常休眠，一休眠 TCP 连接就断了，醒来后重新握手成本很高。</li>
+    </ul>
+    <p>所以很多物联网协议（比如受限应用协议 CoAP）干脆放弃 TCP，直接跑在更简单、"发了就不管"
+    的 UDP 之上。但 UDP 本身不提供任何加密，于是就有了 <strong>DTLS</strong>。</p>
+
+    <h3>12.1.1 Datagram TLS（DTLS）</h3>
+    <div class="callout note">
+      <div class="title">💡 什么是 DTLS</div>
+      <p>Datagram TLS 是 TLS 的一个变种，设计给基于 UDP 的协议使用而不是基于 TCP 的协议。它提供
+      和 TLS 一样的加密与身份验证，唯一的差别是：UDP 报文本来就可能丢失、重复或乱序到达，DTLS
+      必须自己在协议里处理这些情况（比如给每条记录加上显式的序号），而不能像 TCP+TLS 那样假设
+      "字节流一定按顺序完整到达"。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 480" role="img" aria-label="TCP+TLS 握手与 UDP+DTLS 握手对比时序图">
+        <defs>
+          <marker id="arrowA" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+          <marker id="arrowB" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#d97706"/>
+          </marker>
+        </defs>
+        <text x="195" y="16" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">TCP + TLS（可靠字节流，1 次往返握手）</text>
+        <text x="575" y="16" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">UDP + DTLS（不可靠数据报，多 1 次往返防 DoS）</text>
+        <line x1="380" y1="0" x2="380" y2="450" stroke="#e2e5ee" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+        <!-- left panel -->
+        <rect x="30" y="26" width="110" height="32" rx="8" fill="#2563eb"/>
+        <text x="85" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">浏览器</text>
+        <rect x="250" y="26" width="110" height="32" rx="8" fill="#16a34a"/>
+        <text x="305" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">API 服务器</text>
+        <line x1="85" y1="58" x2="85" y2="440" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="305" y1="58" x2="305" y2="440" stroke="#e2e5ee" stroke-width="2"/>
+
+        <circle cx="70" cy="90" r="9" fill="#2563eb"/><text x="70" y="94" text-anchor="middle" font-size="9.5" fill="#fff">1</text>
+        <line x1="85" y1="90" x2="305" y2="90" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowA)" marker-end="url(#arrowA)"/>
+        <text x="195" y="82" text-anchor="middle" font-size="11.5" fill="#1c2333">TCP 三次握手</text>
+
+        <circle cx="70" cy="150" r="9" fill="#2563eb"/><text x="70" y="154" text-anchor="middle" font-size="9.5" fill="#fff">2</text>
+        <line x1="85" y1="150" x2="305" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="195" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">→ ClientHello</text>
+
+        <circle cx="70" cy="210" r="9" fill="#2563eb"/><text x="70" y="214" text-anchor="middle" font-size="9.5" fill="#fff">3</text>
+        <line x1="305" y1="210" x2="85" y2="210" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="195" y="202" text-anchor="middle" font-size="11.5" fill="#1c2333">← ServerHello + 证书</text>
+
+        <circle cx="70" cy="270" r="9" fill="#2563eb"/><text x="70" y="274" text-anchor="middle" font-size="9.5" fill="#fff">4</text>
+        <line x1="85" y1="270" x2="305" y2="270" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="195" y="262" text-anchor="middle" font-size="11.5" fill="#1c2333">→ Finished（握手完成）</text>
+
+        <circle cx="70" cy="330" r="9" fill="#2563eb"/><text x="70" y="334" text-anchor="middle" font-size="9.5" fill="#fff">5</text>
+        <line x1="85" y1="330" x2="305" y2="330" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowA)" marker-end="url(#arrowA)"/>
+        <text x="195" y="322" text-anchor="middle" font-size="11.5" fill="#1c2333">↔ 加密数据（按序、不丢包）</text>
+        <text x="195" y="400" text-anchor="middle" font-size="11" fill="#5b6478">共 3 次往返即可开始收发数据</text>
+
+        <!-- right panel -->
+        <rect x="410" y="26" width="110" height="32" rx="8" fill="#2563eb"/>
+        <text x="465" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">传感器设备</text>
+        <rect x="630" y="26" width="110" height="32" rx="8" fill="#16a34a"/>
+        <text x="685" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">网关 / API</text>
+        <line x1="465" y1="58" x2="465" y2="440" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="685" y1="58" x2="685" y2="440" stroke="#e2e5ee" stroke-width="2"/>
+
+        <circle cx="450" cy="90" r="9" fill="#2563eb"/><text x="450" y="94" text-anchor="middle" font-size="9.5" fill="#fff">1</text>
+        <line x1="465" y1="90" x2="685" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="575" y="82" text-anchor="middle" font-size="11.5" fill="#1c2333">→ ClientHello</text>
+
+        <circle cx="450" cy="150" r="9" fill="#2563eb"/><text x="450" y="154" text-anchor="middle" font-size="9.5" fill="#fff">2</text>
+        <line x1="685" y1="150" x2="465" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="575" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">← HelloVerifyRequest+Cookie</text>
+
+        <circle cx="450" cy="210" r="9" fill="#2563eb"/><text x="450" y="214" text-anchor="middle" font-size="9.5" fill="#fff">3</text>
+        <line x1="465" y1="210" x2="685" y2="210" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="575" y="202" text-anchor="middle" font-size="11.5" fill="#1c2333">→ ClientHello（带 Cookie）</text>
+
+        <circle cx="450" cy="270" r="9" fill="#d97706"/><text x="450" y="274" text-anchor="middle" font-size="9.5" fill="#fff">4</text>
+        <line x1="685" y1="270" x2="465" y2="270" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="575" y="262" text-anchor="middle" font-size="11.5" fill="#1c2333">← ServerHello + 证书</text>
+        <text x="575" y="288" text-anchor="middle" font-size="10" fill="#d97706">丢包需按序号重传，可能乱序</text>
+
+        <circle cx="450" cy="330" r="9" fill="#2563eb"/><text x="450" y="334" text-anchor="middle" font-size="9.5" fill="#fff">5</text>
+        <line x1="465" y1="330" x2="685" y2="330" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="575" y="322" text-anchor="middle" font-size="11.5" fill="#1c2333">→ Finished（握手完成）</text>
+
+        <circle cx="450" cy="390" r="9" fill="#2563eb"/><text x="450" y="394" text-anchor="middle" font-size="9.5" fill="#fff">6</text>
+        <line x1="465" y1="390" x2="685" y2="390" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowA)" marker-end="url(#arrowA)"/>
+        <text x="575" y="382" text-anchor="middle" font-size="11.5" fill="#1c2333">↔ 加密 UDP 报文（可能丢包/乱序/重复）</text>
+        <text x="575" y="415" text-anchor="middle" font-size="11" fill="#5b6478">多一次往返换来防 DoS 反射攻击的能力</text>
+      </svg>
+      <figcaption>图 12-1：TCP+TLS 与 UDP+DTLS 握手对比。DTLS 多了一轮无状态的 HelloVerifyRequest/Cookie
+      交换来防御 DoS 反射攻击，握手之后的数据阶段也必须自己处理丢包、乱序和重复报文。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>客户端 / 设备</span>
+        <span><span class="dot" style="background:#16a34a"></span>服务器 / 网关</span>
+        <span><span class="dot" style="background:#d97706"></span>DTLS 特有的丢包/重传风险点</span>
+      </div>
+    </figure>
+
+    <p>Java 对 DTLS 的支持停留在很底层的 <code class="inline">SSLEngine</code> API——它只是一个纯粹的
+    协议状态机，不像 <code class="inline">SSLSocket</code> 那样帮你把网络收发都封装好，你需要自己写
+    循环，不断调用 <code class="inline">wrap()</code>（把待发送的应用数据打包成 DTLS 报文）和
+    <code class="inline">unwrap()</code>（把收到的 DTLS 报文解出应用数据），并根据
+    <code class="inline">engine.getHandshakeStatus()</code> 返回的
+    <code class="inline">NEED_WRAP</code> / <code class="inline">NEED_UNWRAP</code> /
+    <code class="inline">NEED_TASK</code> 状态决定下一步做什么。本章配套代码里的
+    <code class="inline">DtlsDatagramChannel</code> 类把这套循环封装好了，业务代码只需要调用它的
+    <code class="inline">bind()</code> / <code class="inline">connect()</code> / <code class="inline">send()</code> /
+    <code class="inline">receive()</code>。下面是服务端和客户端最核心的部分：</p>
+
+    <p><code class="inline">ch12/src/main/java/com/manning/apisecurityinaction/DtlsServer.java</code></p>
+    <pre class="plain"><code>public class DtlsServer {
+    public static void main(String... args) throws Exception {
+        try (var channel = new DtlsDatagramChannel(getServerContext())) {
+            channel.bind(54321);
+            var buffer = ByteBuffer.allocate(2048);
+            while (true) {
+                channel.receive(buffer);
+                buffer.flip();
+                var data = UTF_8.decode(buffer).toString();
+                logger.info("Received: {}", data);
+                buffer.compact();
+            }
+        }
+    }
+
+    private static SSLContext getServerContext() throws Exception {
+        var sslContext = SSLContext.getInstance("DTLS");
+        var keyStore = KeyStore.getInstance("PKCS12");
+        keyStore.load(new FileInputStream("localhost.p12"), "changeit".toCharArray());
+        var keyManager = KeyManagerFactory.getInstance("PKIX");
+        keyManager.init(keyStore, "changeit".toCharArray());
+        sslContext.init(keyManager.getKeyManagers(), null, null);
+        return sslContext;
+    }
+}</code></pre>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 这段示例代码没有处理丢包重传</div>
+      <p>书里明确提醒：这个 <code class="inline">DtlsDatagramChannel</code> 只是用来演示 DTLS 握手和收发
+      流程，如果客户端和服务器隔着真实网络（而不是本机回环），丢包是大概率事件，这段代码并不会重发。
+      生产环境要么用 CoAP 这类已经把重传逻辑做好的高层协议，要么直接用专门的 DTLS 库（比如
+      <a href="https://tls.mbed.org" target="_blank" rel="noopener">mbedTLS</a>、
+      <a href="https://www.wolfssl.com" target="_blank" rel="noopener">WolfSSL</a>），不要在生产系统里
+      裸用这段教学代码。</p>
+    </div>
+
+    <div class="callout note">
+      <div class="title">💡 这一节和 Django / Hono.js 有什么关系？</div>
+      <p>几乎没有关系——这是纯粹的传输层/协议层内容。DTLS 跑在 UDP 上，而 Django、Hono.js 这类
+      Web 框架是建立在 TCP + HTTP 之上的，它们根本不会去处理 UDP 握手这件事。真实项目里，这一层
+      通常交给专门的嵌入式 TLS 库（C 语言居多）或者网关设备去做，应用框架拿到的已经是解密后的
+      业务数据。所以这一节我们只展示 Java 原书代码，不去编造 Django/Hono 里并不存在的 DTLS API。</p>
+    </div>
+
+    <h3>12.1.2 面向受限设备的密码套件</h3>
+    <p>普通 Web 服务器的 TLS 密码套件推荐（比如 Mozilla 的建议）是为了在数据中心里追求"又快又安全"
+    设计的，但直接照搬到受限设备上会出问题：</p>
+    <ul>
+      <li>一个套件比如 <code class="inline">ECDHE-RSA-AES256-SHA384</code> 要同时实现椭圆曲线密钥交换、
+      RSA 签名、AES 加解密、SHA-384 哈希——每多一种算法就多一份代码体积；</li>
+      <li>AES-GCM 在带硬件加速的服务器芯片上很快，但在软件里实现容易出错，一旦 nonce（每条消息
+      用于加密的"一次性数字"）不小心重复使用，安全性会灾难性地崩溃；</li>
+      <li>SHA-384/SHA-512 这类为 64 位架构优化的哈希函数，在常见的 8/32 位单片机上反而慢；</li>
+      <li>带前向保密的套件都要同时实现签名算法和密钥交换算法，代码量进一步膨胀。</li>
+    </ul>
+
+    <div class="callout danger">
+      <div class="title">☠️ 为什么 DTLS 特别容易踩 AES-GCM 的 nonce 重用坑</div>
+      <p>AES-GCM 只要同一个 nonce 被用来加密两条不同的消息，安全性就几乎归零。TLS 1.3 之后靠"nonce
+      由记录序号推导"来避免意外重用，但前提是序号必须严格递增、不重复。DTLS 因为跑在不可靠的 UDP
+      上，必须容忍重传、乱序甚至重复的报文，这就让"序号绝对不重复"这个前提变得脆弱得多。所以本章
+      建议在 DTLS 场景下优先选 <strong>AES-CCM</strong> 或 <strong>ChaCha20-Poly1305</strong>，而不是
+      AES-GCM——前者只需要一个 AES 加密电路就能完成全部操作，代码体积小；后者是纯软件实现也能跑得
+      很快的流密码，即使 nonce 意外重复，泄露的信息也比 GCM 少得多。</p>
+    </div>
+
+    <table>
+      <thead><tr><th>选择</th><th>优点</th><th>要注意什么</th></tr></thead>
+      <tbody>
+        <tr><td>AES-CCM / CCM_8</td><td>只需要 AES 加密电路，代码体积小，硬件安全芯片常自带支持</td>
+        <td><code class="inline">_CCM_8</code> 认证标签只有 64 位，容易被暴力破解伪造，配合限流使用</td></tr>
+        <tr><td>ChaCha20-Poly1305</td><td>纯软件实现性能好，无需 AES 硬件加速，适合没有安全芯片的设备</td>
+        <td>Java 12+ 才原生支持，nonce 依然不能重复（只是后果比 GCM 轻）</td></tr>
+        <tr><td>裸公钥（Raw Public Key）</td><td>省掉复杂的 X.509 证书解析和校验代码</td>
+        <td>公钥要在设备出厂时就手工分发好，不能像证书一样临时验证</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="s2"><span class="num">12.2</span>预共享密钥（PSK）</h2>
+    <p>有些设备连椭圆曲线签名、密钥交换这类公钥算法都跑不动。这时可以放弃证书体系，改用
+    <strong>预共享密钥</strong>：客户端和服务器提前（比如出厂时）就约定好同一把对称密钥，握手时
+    只需要证明"我确实持有这把密钥"，完全不涉及签名和证书解析，代码体积能大幅缩小。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 PSK（Pre-Shared Key）</div>
+      <p>PSK 是提前直接分发给客户端和服务器双方的一把对称密钥。因为双方用的是同一把密钥，PSK
+      天然提供"双向"认证——服务器信任客户端，客户端也顺带验证了服务器（毕竟只有真服务器才会算出
+      正确的握手 HMAC）。这一点和证书认证不同：证书里有客户端的"名字"，而 PSK 只是一个不透明的
+      标识符，服务器必须自己维护"这个 PSK 属于哪个设备"的映射关系。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 360" role="img" aria-label="证书握手与 PSK 握手对比时序图">
+        <defs>
+          <marker id="arrowC" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="195" y="16" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">证书方式</text>
+        <text x="575" y="16" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">PSK 方式（省去证书交换）</text>
+        <line x1="380" y1="0" x2="380" y2="345" stroke="#e2e5ee" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+        <rect x="30" y="26" width="110" height="32" rx="8" fill="#2563eb"/>
+        <text x="85" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">客户端</text>
+        <rect x="250" y="26" width="110" height="32" rx="8" fill="#16a34a"/>
+        <text x="305" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">服务器</text>
+        <line x1="85" y1="58" x2="85" y2="330" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="305" y1="58" x2="305" y2="330" stroke="#e2e5ee" stroke-width="2"/>
+
+        <circle cx="70" cy="90" r="9" fill="#2563eb"/><text x="70" y="94" text-anchor="middle" font-size="9.5" fill="#fff">1</text>
+        <line x1="85" y1="90" x2="305" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <text x="195" y="82" text-anchor="middle" font-size="11.5" fill="#1c2333">→ ClientHello</text>
+
+        <circle cx="70" cy="150" r="9" fill="#2563eb"/><text x="70" y="154" text-anchor="middle" font-size="9.5" fill="#fff">2</text>
+        <line x1="305" y1="150" x2="85" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <text x="195" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">← ServerHello + 证书链</text>
+
+        <rect x="95" y="185" width="200" height="46" rx="8" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="195" y="204" text-anchor="middle" font-size="11" fill="#1c2333">用受信 CA 公钥验证证书链</text>
+        <text x="195" y="220" text-anchor="middle" font-size="11" fill="#1c2333">双方各自算出会话密钥</text>
+
+        <circle cx="70" cy="270" r="9" fill="#2563eb"/><text x="70" y="274" text-anchor="middle" font-size="9.5" fill="#fff">3</text>
+        <line x1="85" y1="270" x2="305" y2="270" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowC)" marker-end="url(#arrowC)"/>
+        <text x="195" y="262" text-anchor="middle" font-size="11.5" fill="#1c2333">↔ Finished（应用数据开始）</text>
+
+        <rect x="410" y="26" width="110" height="32" rx="8" fill="#2563eb"/>
+        <text x="465" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">客户端</text>
+        <rect x="630" y="26" width="110" height="32" rx="8" fill="#16a34a"/>
+        <text x="685" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">服务器</text>
+        <line x1="465" y1="58" x2="465" y2="330" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="685" y1="58" x2="685" y2="330" stroke="#e2e5ee" stroke-width="2"/>
+        <text x="575" y="72" text-anchor="middle" font-size="10.5" fill="#5b6478">（双方出厂时已共享同一把 PSK）</text>
+
+        <circle cx="450" cy="90" r="9" fill="#2563eb"/><text x="450" y="94" text-anchor="middle" font-size="9.5" fill="#fff">1</text>
+        <line x1="465" y1="90" x2="685" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <text x="575" y="82" text-anchor="middle" font-size="11.5" fill="#1c2333">→ ClientHello</text>
+
+        <circle cx="450" cy="150" r="9" fill="#2563eb"/><text x="450" y="154" text-anchor="middle" font-size="9.5" fill="#fff">2</text>
+        <line x1="685" y1="150" x2="465" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <text x="575" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">← ServerHello + PSK 提示（无证书!）</text>
+
+        <rect x="475" y="185" width="200" height="46" rx="8" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="575" y="204" text-anchor="middle" font-size="11" fill="#1c2333">双方用共享 PSK + 随机数</text>
+        <text x="575" y="220" text-anchor="middle" font-size="11" fill="#1c2333">各自算出相同的会话密钥</text>
+
+        <circle cx="450" cy="270" r="9" fill="#2563eb"/><text x="450" y="274" text-anchor="middle" font-size="9.5" fill="#fff">3</text>
+        <line x1="465" y1="270" x2="685" y2="270" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowC)" marker-end="url(#arrowC)"/>
+        <text x="575" y="262" text-anchor="middle" font-size="11.5" fill="#1c2333">↔ Finished（应用数据开始）</text>
+      </svg>
+      <figcaption>图 12-2：证书方式需要交换、解析、验证整条证书链；PSK 方式因为双方已经共享同一把密钥，
+      直接跳过证书环节，省下大量代码和握手开销（如果加上临时 Diffie-Hellman 密钥交换，还能获得前向保密）。</figcaption>
+    </figure>
+
+    <p><code class="inline">ch12/.../PskServer.java</code> 用的是 Bouncy Castle 的底层 DTLS API
+    （不是标准 <code class="inline">SSLEngine</code>，因为 Java 内置的 SSLEngine 目前不支持 AES-CCM）：</p>
+    <pre class="plain"><code>var psk = loadPsk(args[0].toCharArray());
+var crypto = new BcTlsCrypto(new SecureRandom());
+var server = new PSKTlsServer(crypto, getIdentityManager(psk)) {
+    @Override
+    protected ProtocolVersion[] getSupportedVersions() {
+        return ProtocolVersion.DTLSv12.only();
+    }
+    @Override
+    protected int[] getSupportedCipherSuites() {
+        return new int[] {
+                CipherSuite.TLS_PSK_WITH_AES_128_CCM,
+                CipherSuite.TLS_PSK_WITH_AES_128_CCM_8,
+                CipherSuite.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256
+        };
+    }
+};
+// ...等待第一个 UDP 包到达后 connect()，再用 DTLSServerProtocol 完成握手
+
+static TlsPSKIdentityManager getIdentityManager(byte[] psk) {
+    return new TlsPSKIdentityManager() {
+        public byte[] getHint() { return null; }          // 不给客户端提示
+        public byte[] getPSK(byte[] identity) { return psk; }  // 所有客户端返回同一把 PSK（教学简化）
+    };
+}
+
+static byte[] loadPsk(char[] password) throws Exception {
+    var keyStore = KeyStore.getInstance("PKCS12");
+    keyStore.load(new FileInputStream("keystore.p12"), password);
+    return keyStore.getKey("aes-key", password).getEncoded();
+}</code></pre>
+
+    <div class="callout warn">
+      <div class="title">⚠️ PSK 不是密码，不能随便挑一个"好记的"字符串</div>
+      <p>PSK 在协议上允许任意长度，但必须是一个高熵、随机生成的值（比如 128 位的随机字节），
+      绝不能用密码那种"人能记住"的字符串。原因很简单：攻击者只要抓到一次完整的握手，就能离线
+      对 PSK 做字典/暴力破解，不像密码那样有服务器端限流保护。</p>
+    </div>
+
+    <div class="callout danger">
+      <div class="title">☠️ 裸 PSK 没有前向保密</div>
+      <p>用书里 <code class="inline">PskClient.java</code> 里那样的裸 PSK 套件（比如
+      <code class="inline">TLS_PSK_WITH_AES_128_CCM</code>），会话密钥完全由 PSK + 双方随机数推导，
+      一旦这把 PSK 泄露，攻击者只要之前录下过握手报文，就能把这台设备<strong>历史上所有</strong>的
+      通信内容全部解密。如果数据敏感、设备又扛得住一点公钥运算，应该选带 <code class="inline">ECDHE</code>
+      的 PSK 套件（比如 <code class="inline">TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256</code>），双方各自
+      生成一次性的临时密钥对，参与会话密钥推导，PSK 泄露也翻不出旧会话的内容——这正是"前向保密"。</p>
+    </div>
+
+    <div class="callout note">
+      <div class="title">💡 这一节的三栏代码去哪了？</div>
+      <p>和 DTLS 一样，PSK 密码套件是 TLS/DTLS 协议内部的握手细节，和 Django、Hono.js 这类跑在 HTTP
+      之上的 Web 框架没有直接对应关系——它们既不会去协商密码套件，也不会自己维护 PSK 身份表。
+      顺带一提：Python 标准库 <code class="inline">ssl</code> 模块从 3.13 版本起新增了
+      <code class="inline">SSLContext.set_psk_client_callback()</code> /
+      <code class="inline">set_psk_server_callback()</code>，可以在<strong>基于 TCP 的 TLS</strong>
+      连接上使用 PSK 认证，但它依然不支持 DTLS（Python 的 <code class="inline">ssl</code> 模块本身
+      就只能包装流式 socket），所以这里不勉强凑三栏对比，只展示真实的 Java 源码。</p>
+    </div>
+
+    <h2 id="s3"><span class="num">12.3</span>端到端安全</h2>
+    <p>DTLS/PSK 只能保证"这一跳"是加密的。可现实中的物联网消息经常要经过好几跳、好几种协议：
+    传感器用 BLE 把数据发给附近的网关，网关翻译成 MQTT 转发给消息队列，另一个服务再把它翻译成
+    一次 HTTP POST 发给云端 API。每一跳单独用 TLS 加密没问题，问题在于：<strong>数据在每个中间
+    网关上都会被解密出来</strong>，因为网关得先看懂内容才能决定怎么转发。这就让每个网关都成了
+    有价值的攻击目标——只要攻破一个，就能看到、甚至篡改流经它的所有数据。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 200" role="img" aria-label="端到端加密穿越多个网关示意图">
+        <defs>
+          <marker id="arrowD" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="380" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">设备消息穿越多种协议、多个网关</text>
+
+        <rect x="20" y="100" width="120" height="40" rx="8" fill="#2563eb"/>
+        <text x="80" y="124" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">传感器设备</text>
+
+        <rect x="190" y="100" width="140" height="40" rx="8" fill="#d97706"/>
+        <text x="260" y="118" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">网关 A</text>
+        <text x="260" y="133" text-anchor="middle" fill="#fff" font-size="10">BLE → MQTT</text>
+
+        <rect x="372" y="92" width="146" height="56" rx="8" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <rect x="380" y="100" width="130" height="40" rx="8" fill="#d97706"/>
+        <text x="445" y="118" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">网关 B</text>
+        <text x="445" y="133" text-anchor="middle" fill="#fff" font-size="10">MQTT → HTTP</text>
+
+        <rect x="570" y="100" width="150" height="40" rx="8" fill="#16a34a"/>
+        <text x="645" y="124" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">云端 API</text>
+
+        <line x1="140" y1="120" x2="188" y2="120" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <text x="164" y="108" text-anchor="middle" font-size="10" fill="#1c2333">🔒</text>
+        <line x1="332" y1="120" x2="370" y2="120" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <text x="351" y="108" text-anchor="middle" font-size="10" fill="#1c2333">🔒</text>
+        <line x1="512" y1="120" x2="568" y2="120" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <text x="540" y="108" text-anchor="middle" font-size="10" fill="#1c2333">🔒</text>
+
+        <text x="445" y="168" text-anchor="middle" font-size="11" fill="#dc2626">⚠ 假设网关 B 已被攻陷</text>
+        <text x="445" y="182" text-anchor="middle" font-size="10.5" fill="#16a34a">端到端加密的载荷依然只是一堆密文，网关看不懂</text>
+      </svg>
+      <figcaption>图 12-3：请求体在客户端就已经用端到端加密和认证包好，中间的网关只翻译外层协议头（BLE/MQTT/HTTP），
+      看不到、也改不了里面加密的内容——即使某个网关被攻陷也一样。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>设备</span>
+        <span><span class="dot" style="background:#d97706"></span>协议网关</span>
+        <span><span class="dot" style="background:#16a34a"></span>目标 API</span>
+        <span><span class="dot" style="background:#dc2626"></span>被攻陷风险点</span>
+      </div>
+    </figure>
+
+    <div class="callout tip">
+      <div class="title">✅ 端到端安全不是取代传输层安全</div>
+      <p>两者要一起用：传输层的 DTLS/TLS 保护的是这一跳的所有内容，包括协议头；端到端加密只保护
+      应用数据本身，不保护外层协议头（比如 MQTT 主题名）。缺了传输层加密，中间网络也能被窃听或
+      篡改协议头；缺了端到端加密，攻陷任意一个中间节点就能看到明文业务数据。</p>
+    </div>
+
+    <h3>12.3.1 COSE：给二进制格式的"JOSE"</h3>
+    <p>受限设备通常不用 JSON——数字用十进制字符串写出来太浪费空间了，业界更常用
+    <strong>CBOR</strong>（Concise Binary Object Representation）这种紧凑的二进制格式，数据模型和
+    JSON 基本对应（对象、数组、字符串、数字），但省去了大量文本编码的开销。对应 JOSE 的 CBOR 版本
+    就是 <strong>COSE</strong>（CBOR Object Signing and Encryption）：一样能做签名、加密，只是
+    算法集合更贴近受限设备（比如支持 AES-CCM），同时去掉了一些有已知弱点的老算法。</p>
+
+    <div class="callout note">
+      <div class="title">💡 COSE 里的 HKDF 是用来解决什么问题的</div>
+      <p>COSE 的认证加密算法都要求一个较短的 nonce，短到不适合每次随机生成（重复概率不可忽略）。
+      COSE 的做法是：不直接拿主密钥去加密，而是每条消息都生成一个随机数（nonce），配合 HKDF
+      从主密钥派生出<strong>这一条消息专用</strong>的密钥。这样即使随机数意外重复，泄露的也只是
+      "两条消息用了同一把派生密钥"，而不会直接导致主密钥或大量历史消息暴露。COSE 还允许把发送方
+      （PartyU）、接收方（PartyV）的身份标识一起混入密钥派生，这样"把 Bob 发给 Alice 的消息原样
+      重放给 Alice"（反射攻击）也会因为派生出错误的密钥而失败。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· COSE 参考实现（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· 简化演示</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· 简化演示</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch12/.../CoseEncryptionExample.java（节选）</div>
+        <pre><code>Security.addProvider(new BouncyCastleProvider());
+var keyMaterial = PskServer.loadPsk("changeit".toCharArray());
+
+var recipient = new Recipient();
+var keyData = CBORObject.NewMap()
+        .Add(KeyKeys.KeyType.AsCBOR(), KeyKeys.KeyType_Octet)
+        .Add(KeyKeys.Octet_K.AsCBOR(), keyMaterial);
+recipient.SetKey(new OneKey(keyData));
+recipient.addAttribute(HeaderKeys.Algorithm,
+        AlgorithmID.HKDF_HMAC_SHA_256.AsCBOR(), Attribute.PROTECTED);
+
+var nonce = new byte[16];
+random.nextBytes(nonce);
+recipient.addAttribute(HeaderKeys.HKDF_Context_PartyU_nonce,
+        CBORObject.FromObject(nonce), Attribute.PROTECTED);
+
+var message = new EncryptMessage();
+message.SetContent("Hello, World!");
+message.addAttribute(HeaderKeys.Algorithm,
+        AlgorithmID.AES_CCM_16_128_128.AsCBOR(), Attribute.PROTECTED);
+message.addRecipient(recipient);
+message.encrypt();
+
+System.out.println(Base64url.encode(message.EncodeToBytes()));</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">iot/cose_demo.py（教学示例，简化版，不是完整 COSE/RFC 8152 实现；
+        完整实现可参考 pycose 库）</div>
+        <pre><code>import os
+import cbor2
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+
+key_material = load_psk("changeit")        # 32 字节主密钥（来自 keystore）
+aesccm = AESCCM(key_material[:16], tag_length=16)
+
+# 用一个随机 nonce 代表 COSE 里"每条消息独立派生密钥"的思路
+nonce = os.urandom(13)                     # AES-CCM 要求 7~13 字节 nonce
+payload = cbor2.dumps({"sensor": "F5671434", "reading": 1234})
+
+ciphertext = aesccm.encrypt(nonce, payload, associated_data=b"partyU-nonce")
+envelope = cbor2.dumps({"nonce": nonce, "ciphertext": ciphertext})
+
+# 接收方用同一把 key_material 解密
+plaintext = aesccm.decrypt(nonce, ciphertext, associated_data=b"partyU-nonce")
+reading = cbor2.loads(plaintext)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/iot/cose.ts（教学示例，简化版，不是完整 COSE 实现；
+        更贴近规范可参考 cose-js）</div>
+        <pre><code>import crypto from "node:crypto";
+import cbor from "cbor";
+
+const keyMaterial = loadPsk("changeit");        // 32 字节主密钥
+const nonce = crypto.randomBytes(13);           // AES-CCM nonce 7~13 字节
+
+const payload = cbor.encode({ sensor: "F5671434", reading: 1234 });
+
+const cipher = crypto.createCipheriv(
+  "aes-128-ccm",
+  keyMaterial.subarray(0, 16),
+  nonce,
+  { authTagLength: 16 },
+);
+cipher.setAAD(Buffer.from("partyU-nonce"));
+const ciphertext = Buffer.concat([cipher.update(payload), cipher.final()]);
+const authTag = cipher.getAuthTag();
+
+const envelope = cbor.encode({ nonce, ciphertext, authTag });</code></pre>
+      </div>
+    </div>
+
+    <h3>12.3.2 COSE 的替代方案：NaCl</h3>
+    <p>如果不需要跨厂商互操作，COSE 支持的算法组合太多反而是负担（书里作者数过，COSE 算法注册表
+    里有 61 种算法变体）。这种情况下可以直接用 <strong>NaCl</strong>（Networking and Cryptography
+    Library，第 6 章已经用过）——它把"该用什么算法"这个决定权从开发者手里拿走，帮你选好一套经过
+    专家审查、组合安全的算法。如果设备能做一点公钥运算，NaCl 的 <code class="inline">CryptoBox</code>
+    还能提供带发送方认证的公钥加密：</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Salty Coffee（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· PyNaCl</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· tweetnacl</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch12/.../NaclCborExample.java</div>
+        <pre><code>var senderKeys = CryptoBox.keyPair();
+var recipientKeys = CryptoBox.keyPair();
+var cborMap = CBORObject.NewMap()
+        .Add("foo", "bar")
+        .Add("data", 12345);
+
+var sent = CryptoBox.encrypt(senderKeys.getPrivate(),
+        recipientKeys.getPublic(), cborMap.EncodeToBytes());
+
+var recvd = CryptoBox.fromString(sent.toString());
+var cbor = recvd.decrypt(recipientKeys.getPrivate(),
+        senderKeys.getPublic());
+System.out.println(CBORObject.DecodeFromBytes(cbor));</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">iot/nacl_box.py（教学示例，使用 PyNaCl / libsodium 绑定）</div>
+        <pre><code>from nacl.public import PrivateKey, Box
+import cbor2
+
+sender_keys = PrivateKey.generate()
+recipient_keys = PrivateKey.generate()
+
+cbor_payload = cbor2.dumps({"foo": "bar", "data": 12345})
+
+box = Box(sender_keys, recipient_keys.public_key)
+sent = box.encrypt(cbor_payload)        # nonce 由 PyNaCl 自动生成并附带在结果里
+
+recv_box = Box(recipient_keys, sender_keys.public_key)
+plaintext = recv_box.decrypt(sent)
+print(cbor2.loads(plaintext))</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/iot/naclBox.ts（教学示例，使用 tweetnacl）</div>
+        <pre><code>import nacl from "tweetnacl";
+import cbor from "cbor";
+
+const senderKeys = nacl.box.keyPair();
+const recipientKeys = nacl.box.keyPair();
+
+const cborPayload = cbor.encode({ foo: "bar", data: 12345 });
+const nonce = nacl.randomBytes(nacl.box.nonceLength);
+
+const sent = nacl.box(cborPayload, nonce, recipientKeys.publicKey, senderKeys.secretKey);
+
+const opened = nacl.box.open(sent, nonce, senderKeys.publicKey, recipientKeys.secretKey);
+console.log(cbor.decode(Buffer.from(opened)));</code></pre>
+      </div>
+    </div>
+
+    <h3>12.3.3 抗误用的认证加密（SIV-AES）</h3>
+    <p>无论用 COSE 还是 NaCl，前提都是设备能可靠地生成随机 nonce。但很多受限设备恰恰缺乏好的
+    随机数来源（没有可靠时钟、没有硬件随机数发生器），一旦 nonce 意外重复，普通的认证加密算法会
+    灾难性失败。<strong>抗误用认证加密（MRAE，Misuse-Resistant Authenticated Encryption）</strong>
+    就是为这种场景设计的：即使 nonce 不小心重复了，损失也很小——攻击者最多只能知道"这两条消息内容
+    完全一样"，既不会泄露明文，也不会让攻击者伪造消息。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 190" role="img" aria-label="SIV 模式工作原理示意图">
+        <defs>
+          <marker id="arrowE" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="320" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#1c2333">SIV-AES：用 MAC 标签当作加密用的 IV</text>
+
+        <rect x="20" y="55" width="150" height="34" rx="8" fill="#7c3aed"/>
+        <text x="95" y="76" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">明文 + 关联数据</text>
+
+        <rect x="230" y="40" width="150" height="34" rx="8" fill="#16a34a"/>
+        <text x="305" y="61" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">① AES-CMAC → SIV</text>
+
+        <rect x="230" y="112" width="150" height="34" rx="8" fill="#2563eb"/>
+        <text x="305" y="133" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">② AES-CTR 用 SIV 当 IV</text>
+
+        <rect x="450" y="40" width="150" height="34" rx="8" fill="#16a34a"/>
+        <text x="525" y="61" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">认证标签（= SIV）</text>
+
+        <rect x="450" y="112" width="150" height="34" rx="8" fill="#2563eb"/>
+        <text x="525" y="133" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">密文</text>
+
+        <line x1="170" y1="72" x2="228" y2="57" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <line x1="170" y1="72" x2="228" y2="129" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <line x1="305" y1="74" x2="305" y2="110" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <text x="345" y="98" font-size="10" fill="#d97706">SIV 同时也是 IV</text>
+        <line x1="380" y1="57" x2="448" y2="57" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <line x1="380" y1="129" x2="448" y2="129" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+
+        <text x="320" y="172" text-anchor="middle" font-size="11" fill="#5b6478">两条不同的消息，SIV 几乎不可能相同 → 加密用的 IV 也不会重复</text>
+      </svg>
+      <figcaption>图 12-4：SIV 模式先对明文和关联数据算一次 MAC，把这个标签当作加密阶段的 IV 使用。
+      只要两条消息内容不同，MAC 标签几乎不可能相同，也就避免了 IV 重复带来的灾难性泄露。</figcaption>
+    </figure>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· siv-mode（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· cryptography</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· miscreant</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch12/.../AesSivExample.java</div>
+        <pre><code>var psk = PskServer.loadPsk("changeit".toCharArray());
+var macKey = new SecretKeySpec(Arrays.copyOfRange(psk, 0, 16), "AES");
+var encKey = new SecretKeySpec(Arrays.copyOfRange(psk, 16, 32), "AES");
+
+var randomIv = new byte[16];
+new SecureRandom().nextBytes(randomIv);
+var header = "Test header".getBytes();
+var body = CBORObject.NewMap()
+        .Add("sensor", "F5671434")
+        .Add("reading", 1234).EncodeToBytes();
+
+var siv = new SivMode();
+var ciphertext = siv.encrypt(encKey, macKey, body, header, randomIv);
+var plaintext = siv.decrypt(encKey, macKey, ciphertext, header, randomIv);
+assert Arrays.equals(plaintext, body);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">iot/siv_demo.py（教学示例，使用 cryptography 库内置的 AESSIV，实现 RFC 5297）</div>
+        <pre><code>import os
+import cbor2
+from cryptography.hazmat.primitives.ciphers.aead import AESSIV
+
+psk = load_psk("changeit")          # 32 字节 → AES-128-SIV（两把 16 字节子密钥）
+aessiv = AESSIV(psk)
+
+header = b"Test header"
+random_iv = os.urandom(16)
+body = cbor2.dumps({"sensor": "F5671434", "reading": 1234})
+
+# AES-SIV 用一组"关联数据"代替显式 nonce；随机 IV 作为最后一块关联数据传入
+ciphertext = aessiv.encrypt(body, [header, random_iv])
+plaintext = aessiv.decrypt(ciphertext, [header, random_iv])
+assert plaintext == body</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/iot/siv.ts（教学示例，使用 miscreant，一个多语言实现 RFC 5297 AES-SIV 的库）</div>
+        <pre><code>import { SIV } from "miscreant";
+import crypto from "node:crypto";
+import cbor from "cbor";
+
+const pskKey = loadPsk("changeit");                 // 32 字节 → AES-128-SIV
+const csprng = { getBytes: (n: number) => crypto.randomBytes(n) };
+const siv = await SIV.importKey(pskKey, "AES-CMAC-SIV", csprng);
+
+const header = Buffer.from("Test header");
+const randomIv = crypto.randomBytes(16);
+const body = cbor.encode({ sensor: "F5671434", reading: 1234 });
+
+const ciphertext = await siv.seal(body, [header, randomIv]);
+const plaintext = await siv.open(ciphertext, [header, randomIv]);</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ 什么时候选 SIV-AES</div>
+      <p>如果设备缺乏可靠的随机数来源，或者你不放心自己/团队能不能把 nonce 管理得万无一失，SIV-AES
+      是比 AES-CCM/ChaCha20-Poly1305 更保险的选择：即使 nonce 真的重复了，也只会轻微降级，不会像
+      AES-GCM 那样直接泄露明文或允许伪造消息。代价是它需要对消息做两遍处理（先算 MAC 再加密），
+      比单遍的 AEAD 算法慢一些。</p>
+    </div>
+
+    <h2 id="s4"><span class="num">12.4</span>密钥分发与管理</h2>
+    <p>普通 API 用公钥基础设施（PKI，第 10 章讲过）解决密钥分发问题：每个设备有自己的密钥对和
+    CA 签名的证书。但对做不了公钥运算的受限设备，只能退回对称密钥，而对称密钥必须让通信双方
+    都持有同一份——这在设备数量庞大时就成了一个需要专门方案的问题。</p>
+
+    <h3>12.4.1 一次性密钥预配</h3>
+    <p>最简单的做法是在设备出厂（或组织采购设备）时，一次性把密钥写入设备的只读存储，同时把加密
+    后的密钥连同设备序列号存进一个中心目录（比如 LDAP），供 API 服务器按需查询。工厂里通常会用
+    硬件安全模块（HSM）来安全地生成和保管这批主密钥。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-label="出厂密钥预配架构示意图">
+        <defs>
+          <marker id="arrowF" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="380" y="18" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">出厂密钥预配 + 设备目录</text>
+
+        <rect x="40" y="30" width="160" height="48" rx="8" fill="#0891b2"/>
+        <text x="120" y="49" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">工厂 HSM</text>
+        <text x="120" y="65" text-anchor="middle" fill="#fff" font-size="10">安全生成/保管主密钥</text>
+
+        <rect x="40" y="180" width="160" height="48" rx="8" fill="#2563eb"/>
+        <text x="120" y="199" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">设备（出厂时）</text>
+        <text x="120" y="215" text-anchor="middle" fill="#fff" font-size="10">密钥写入只读存储</text>
+
+        <rect x="330" y="180" width="180" height="48" rx="8" fill="#7c3aed"/>
+        <text x="420" y="199" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">设备目录</text>
+        <text x="420" y="215" text-anchor="middle" fill="#fff" font-size="10">(LDAP / 数据库)</text>
+
+        <rect x="580" y="180" width="160" height="48" rx="8" fill="#16a34a"/>
+        <text x="660" y="199" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">API 服务器</text>
+        <text x="660" y="215" text-anchor="middle" fill="#fff" font-size="10">按需查询/解密密钥</text>
+
+        <line x1="120" y1="78" x2="120" y2="178" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="132" y="128" font-size="11" fill="#1c2333">① 出厂时写入设备密钥</text>
+
+        <line x1="200" y1="60" x2="330" y2="195" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="255" y="118" font-size="10.5" fill="#1c2333">② 加密后的密钥</text>
+        <text x="255" y="132" font-size="10.5" fill="#1c2333">+ 序列号存入目录</text>
+
+        <line x1="580" y1="204" x2="512" y2="204" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="546" y="196" text-anchor="middle" font-size="10.5" fill="#1c2333">③ 查询密钥</text>
+
+        <path d="M120,228 L120,262 L660,262 L660,228" fill="none" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="390" y="280" text-anchor="middle" font-size="11" fill="#1c2333">④ 设备直接用密钥认证 / 加解密请求（无需再联系工厂）</text>
+      </svg>
+      <figcaption>图 12-5：设备密钥在出厂时一次性写入，加密后连同序列号存进中心目录；API 服务器按需从目录
+      取出并解密对应的设备密钥，之后设备和服务器就可以直接用这把密钥通信。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#0891b2"></span>工厂 / HSM</span>
+        <span><span class="dot" style="background:#2563eb"></span>设备</span>
+        <span><span class="dot" style="background:#7c3aed"></span>设备目录</span>
+        <span><span class="dot" style="background:#16a34a"></span>API 服务器</span>
+      </div>
+    </figure>
+
+    <p>另一种做法是不给每台设备存一把完全随机的密钥，而是用 HKDF 从一把主密钥加上设备的唯一标识
+    （序列号、MAC 地址）派生出设备专属密钥。这样服务器不需要把成千上万台设备的密钥都存进数据库，
+    只要知道主密钥和设备标识，现算就行——微软 Azure IoT Hub 的设备批量注册用的就是类似思路。</p>
+
+    <h3>12.4.2 密钥分发服务器</h3>
+    <p>比"一锤子买卖"更灵活的方案是用一台<strong>密钥分发服务器</strong>：设备先用出厂时的初始
+    密钥完成一次注册，之后分发服务器会定期用旧密钥加密、发给设备一把新密钥。这样设备不需要自己
+    生成随机数（很多受限设备缺乏好的熵源），也能定期换密钥。也可以借助已有的协议来做这件事，比如
+    草案中的 OAuth2 扩展支持在签发访问令牌的同时分发一把对称密钥（第 13 章还会继续聊 OAuth2 在
+    物联网里的用法）。</p>
+
+    <h3>12.4.3 为前向保密做棘轮（ratcheting）</h3>
+    <p>如果设备一直用同一把密钥，密钥一旦泄露，攻击者不但能解密以后的通信，连之前录下来的历史
+    消息也能一并解密。<strong>棘轮</strong>提供了一种纯对称密码学的解决办法：每隔一段时间（比如
+    每天、每小时，或者每发 10 条消息），用一个单向函数把旧密钥"转"成一把新密钥，然后彻底丢弃旧
+    密钥。因为这个函数只能往前推、不能往后退，即使将来某把新密钥泄露，也没法从它反推出更早的
+    旧密钥，历史消息依然安全。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 190" role="img" aria-label="密钥棘轮与前向保密示意图">
+        <defs>
+          <marker id="arrowG" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="380" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1c2333">密钥棘轮：每次通信后钥匙"往前转一格"，旧钥匙丢弃</text>
+
+        <rect x="15" y="40" width="90" height="40" rx="8" fill="#16a34a"/>
+        <text x="60" y="65" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">K0</text>
+        <rect x="175" y="40" width="90" height="40" rx="8" fill="#16a34a"/>
+        <text x="220" y="65" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">K1</text>
+        <rect x="335" y="40" width="90" height="40" rx="8" fill="#d97706"/>
+        <text x="380" y="65" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">K2</text>
+        <rect x="495" y="40" width="90" height="40" rx="8" fill="#dc2626"/>
+        <text x="540" y="65" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">K3</text>
+        <rect x="655" y="40" width="90" height="40" rx="8" fill="#dc2626"/>
+        <text x="700" y="65" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">K4</text>
+
+        <line x1="105" y1="60" x2="173" y2="60" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="139" y="52" text-anchor="middle" font-size="9.5" fill="#5b6478">HKDF</text>
+        <line x1="265" y1="60" x2="333" y2="60" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="299" y="52" text-anchor="middle" font-size="9.5" fill="#5b6478">HKDF</text>
+        <line x1="425" y1="60" x2="493" y2="60" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="459" y="52" text-anchor="middle" font-size="9.5" fill="#5b6478">HKDF</text>
+        <line x1="585" y1="60" x2="653" y2="60" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="619" y="52" text-anchor="middle" font-size="9.5" fill="#5b6478">HKDF</text>
+
+        <text x="380" y="30" text-anchor="middle" font-size="14" fill="#d97706">⚡</text>
+        <text x="380" y="98" text-anchor="middle" font-size="10.5" fill="#d97706">此处密钥泄露</text>
+
+        <line x1="15" y1="112" x2="265" y2="112" stroke="#16a34a" stroke-width="2"/>
+        <line x1="15" y1="106" x2="15" y2="118" stroke="#16a34a" stroke-width="2"/>
+        <line x1="265" y1="106" x2="265" y2="118" stroke="#16a34a" stroke-width="2"/>
+        <text x="140" y="132" text-anchor="middle" font-size="11" fill="#16a34a">✓ 前向保密：读不到 K0/K1 时期的历史消息</text>
+
+        <line x1="335" y1="112" x2="745" y2="112" stroke="#dc2626" stroke-width="2"/>
+        <line x1="335" y1="106" x2="335" y2="118" stroke="#dc2626" stroke-width="2"/>
+        <line x1="745" y1="106" x2="745" y2="118" stroke="#dc2626" stroke-width="2"/>
+        <text x="540" y="132" text-anchor="middle" font-size="11" fill="#dc2626">✗ 无后妥协安全：K3/K4 也能被直接推出来</text>
+
+        <text x="380" y="166" text-anchor="middle" font-size="10.5" fill="#5b6478">棘轮只能保护"过去"，保护不了"未来"——这是它和"后妥协安全"的关键区别</text>
+      </svg>
+      <figcaption>图 12-6：棘轮机制下，密钥沿单向函数依次推进。K2 泄露不会波及更早的 K0/K1（前向保密），
+      但攻击者拿到 K2 后可以顺着同样的单向函数一路推出 K3、K4——棘轮本身无法阻止这一点。</figcaption>
+    </figure>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· AES-CTR 棘轮（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· cryptography</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Node crypto</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch12/.../RatchetExample.java</div>
+        <pre><code>private static byte[] ratchet(byte[] oldKey) throws Exception {
+    var cipher = Cipher.getInstance("AES/CTR/NoPadding");
+    var iv = new byte[16];
+    Arrays.fill(iv, (byte) 0xFF);          // 保留全 1 的 IV 专门用于棘轮，绝不用来加密消息
+    cipher.init(Cipher.ENCRYPT_MODE,
+            new SecretKeySpec(oldKey, "AES"), new IvParameterSpec(iv));
+    return cipher.doFinal(new byte[32]);   // 加密 32 个全零字节，输出即为新密钥
+}
+
+var key = PskServer.loadPsk(args[0].toCharArray());
+for (int i = 0; i &lt; 10; ++i) {
+    var newKey = ratchet(key);
+    Arrays.fill(key, (byte) 0);            // 旧密钥用完立刻清零
+    key = newKey;
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">iot/ratchet.py（教学示例）</div>
+        <pre><code>from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+def ratchet(old_key: bytes) -&gt; bytes:
+    iv = b"\xff" * 16                       # 保留全 1 的 IV 专门用于棘轮
+    encryptor = Cipher(algorithms.AES(old_key), modes.CTR(iv)).encryptor()
+    return encryptor.update(b"\x00" * 32) + encryptor.finalize()
+
+key = load_psk("changeit")
+for _ in range(10):
+    new_key = ratchet(key)
+    key = new_key                           # 旧 key 应尽快从内存中清除</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/iot/ratchet.ts（教学示例）</div>
+        <pre><code>import crypto from "node:crypto";
+
+function ratchet(oldKey: Buffer): Buffer {
+  const iv = Buffer.alloc(16, 0xff);        // 保留全 1 的 IV 专门用于棘轮
+  const cipher = crypto.createCipheriv("aes-256-ctr", oldKey, iv);
+  return Buffer.concat([cipher.update(Buffer.alloc(32)), cipher.final()]);
+}
+
+let key = loadPsk("changeit");
+for (let i = 0; i &lt; 10; i++) {
+  const newKey = ratchet(key);
+  key.fill(0);                              // 旧 key 尽快清零
+  key = newKey;
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 棘轮双方必须在同一个时刻"转"</div>
+      <p>棘轮只有在客户端和服务器都清楚"什么时候该转"的前提下才有效，否则两边会算出不同的密钥。
+      通常约定在固定的时间点（每天/每小时）或固定的消息数之后转动。按消息数棘轮还有个额外好处：
+      如果服务器发现某台设备发来的消息数量比预期多（棘轮提前触发了），这往往说明设备密钥已经被
+      别人拿去用了——可以当作一种入侵检测信号。</p>
+    </div>
+
+    <h3>12.4.4 后妥协安全性（post-compromise security）</h3>
+    <p>前向保密回答的是"密钥泄露后，<strong>过去</strong>的消息还安全吗"，而
+    <strong>后妥协安全性</strong>回答的是相反的问题："密钥泄露后，<strong>未来</strong>的消息还能
+    恢复安全吗"。棘轮机制对这个问题无能为力——攻击者一旦拿到当前的棘轮密钥，就能顺着同一个单向
+    函数把后续所有密钥都算出来。</p>
+
+    <div class="callout danger">
+      <div class="title">☠️ 前向保密 ≠ 后妥协安全，这是最容易混淆的一对概念</div>
+      <p>前向保密保护的是"过去"，后妥协安全保护的是"未来"，二者互不包含。单靠棘轮只能拿到前向
+      保密；要拿到后妥协安全，要么依赖安全硬件（TPM、TEE、安全元件芯片），让攻击者即便攻陷了
+      运行环境也拿不到裸密钥本身；要么依赖一次不被攻击者干扰的密钥交换——比如双方各自生成一次性
+      公私钥对，做一次 Diffie-Hellman 交换，把结果混入下一次棘轮。只要有那么一次交换没被主动
+      中间人攻击拦截篡改，安全性就能重新建立起来。</p>
+    </div>
+
+    <p>现实中，达到严格的后妥协安全性成本相当高（要么加硬件，要么加复杂的密码学协议），多数物联网
+    项目更该把预算优先花在"从一开始就避免设备被攻陷"上；只有面向特别敏感数据或高价值资产的设备，
+    才值得为后妥协安全专门投入。</p>
+
+    <h2 id="s5">本章小结</h2>
+    <table>
+      <thead><tr><th>机制</th><th>解决什么问题</th><th>关键选择</th></tr></thead>
+      <tbody>
+        <tr><td>DTLS</td><td>在不可靠的 UDP 上提供和 TLS 等价的加密/认证</td>
+        <td>自己处理丢包/乱序/重复，靠 HelloVerifyRequest 防 DoS 反射攻击</td></tr>
+        <tr><td>受限设备密码套件</td><td>缩减代码体积、避开容易误用的算法</td>
+        <td>优先 AES-CCM / ChaCha20-Poly1305，避免 DTLS 下的 AES-GCM</td></tr>
+        <tr><td>PSK</td><td>省去证书解析/验证，用共享密钥做双向认证</td>
+        <td>密钥必须高熵随机；需要前向保密就加 ECDHE</td></tr>
+        <tr><td>COSE / NaCl</td><td>让加密穿透多跳网关，做真正的端到端安全</td>
+        <td>互操作性要求高选 COSE；追求简单安全选 NaCl</td></tr>
+        <tr><td>SIV-AES（MRAE）</td><td>缓解受限设备缺乏可靠随机数导致的 nonce 重用风险</td>
+        <td>nonce 重复只轻微降级，不会灾难性泄露</td></tr>
+        <tr><td>密钥预配 / 分发服务器</td><td>大规模管理设备密钥</td>
+        <td>出厂一次性写入 或 定期由分发服务器下发新密钥</td></tr>
+        <tr><td>棘轮</td><td>用纯对称密码学换取前向保密</td>
+        <td>双方必须在相同时刻转动；不提供后妥协安全</td></tr>
+        <tr><td>后妥协安全性</td><td>密钥泄露后恢复未来通信的安全性</td>
+        <td>依赖安全硬件，或一次未被中间人干扰的密钥交换</td></tr>
+      </tbody>
+    </table>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch11/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 11 章：保护服务间调用的 API</span></a>
+      <a class="next" href="../ch13/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 13 章：保护物联网 API →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

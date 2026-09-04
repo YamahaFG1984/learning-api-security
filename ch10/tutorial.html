@@ -1,0 +1,1204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 10 章：Kubernetes 中的微服务 API · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">10.1 Kubernetes 基础概念</a>
+      <a href="#s2">10.2 把 Natter 容器化并部署</a>
+      <a href="#s3">10.2.4 新增 link-preview 微服务</a>
+      <a href="#s4">10.2.7 防止 SSRF 攻击</a>
+      <a href="#s5">10.2.8 DNS rebinding 攻击</a>
+      <a href="#s6">10.3 用 TLS 保护微服务通信</a>
+      <a href="#s7">10.3.3 用网络策略锁定连接</a>
+      <a href="#s8">10.4 保护入站请求</a>
+      <a href="#s9">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 10 章</span>
+    <h1>Kubernetes 中的微服务 API</h1>
+    <p class="subtitle">把 Natter 从一个进程拆成一群微服务，交给 Kubernetes 管理，同时不让攻击者钻空子。</p>
+
+    <p>
+      前面几章一直在给<strong>一栋房子</strong>（也就是单个 Natter API 进程）加固门锁：认证、限流、
+      访问控制、令牌……这一章，房子要被拆成好几栋，分别建在不同的地块上：一栋专门存数据（数据库），
+      一栋对外提供业务接口（Natter API 本身），还要新盖一栋专门"帮用户看一眼链接长什么样"的小屋
+      （link-preview 微服务）。谁来负责给这些房子分配地址、监控它们死没死、死了要不要重建？
+      这活儿交给一个叫 <strong>Kubernetes</strong> 的"物业公司"。
+    </p>
+    <p>
+      物业能带来很多便利，但小区大了也会有新麻烦：外面的人能不能直接闯进某一栋房子？
+      房子之间通信的电话线会不会被人搭线监听？如果那个"看链接"的小屋被骗着帮攻击者去敲开
+      小区里其他房子的门怎么办？这一章会一路讲清楚：怎么把 Natter 拆成 Docker 容器、怎么用
+      Kubernetes 的 Deployment / Service / Ingress 把它们管起来，以及新增的 link-preview 服务
+      如何被 <strong>SSRF（服务端请求伪造）</strong>和 <strong>DNS rebinding（DNS 重绑定）</strong>
+      这两种攻击盯上，又该怎么防。
+    </p>
+
+    <h2 id="s1"><span class="num">10.1</span>Kubernetes 里的几个基本概念</h2>
+    <p>
+      在动手之前，先把几个反复出现的名词理清楚，不然后面的 YAML 文件会看得云里雾里。你可以把
+      Kubernetes 集群想象成一个小区物业系统：
+    </p>
+    <ul>
+      <li><strong>Node（节点）</strong>：一台能跑容器的物理机或虚拟机，相当于小区里的一块地皮。</li>
+      <li><strong>Container（容器）</strong>：一个被隔离起来的进程，通常一个容器只跑一个进程
+        （比如一个 HTTP 服务器）。</li>
+      <li><strong>Pod</strong>：一个或多个容器打包在一起的最小部署单元，相当于盖在地皮上的一栋房子。
+        大多数情况下一个 Pod 里只放一个主容器，遵循"一个 Pod 一个进程"的原则。</li>
+      <li><strong>Service</strong>：给一组功能相同的 Pod（同一个应用的多个副本）分配的一个<strong>固定
+        的虚拟 IP 和 DNS 名字</strong>。Pod 可能随时被 Kubernetes 销毁重建、漂移到别的 Node 上，
+        但 Service 的地址永远不变，别的 Pod 只需要认准这个地址发请求，Kubernetes 会自动把流量转发到
+        某个健康的 Pod 上。</li>
+    </ul>
+    <div class="callout note">
+      <div class="title">💡 为什么不能直接用 Pod 的 IP？</div>
+      <p>
+        Pod 是"随时可能死掉重建"的临时物件——它的 IP 地址会随着重建而改变。如果 Natter API 硬编码了
+        数据库 Pod 的 IP，数据库 Pod 一旦重启换了 IP，Natter API 就再也连不上了。Service 就是为了解决
+        这个问题：它像小区里"物业统一分配、永不改变的门牌号"，背后具体是哪一栋房子在应答，由 Kubernetes
+        内部的服务发现机制去处理，调用方完全不用关心。
+      </p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 680 360" role="img" aria-label="Kubernetes 中 Node、Pod、Container、Service 的关系图">
+        <defs>
+          <marker id="arrow1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="15" y="15" width="650" height="330" rx="14" fill="none" stroke="#9aa4bf" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text x="30" y="34" font-size="12" font-weight="700" fill="#5b6478">Kubernetes 集群</text>
+
+        <rect x="210" y="50" width="260" height="44" rx="22" fill="#16a34a"/>
+        <text x="340" y="68" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">Service</text>
+        <text x="340" y="84" text-anchor="middle" fill="#fff" font-size="11">natter-api-service（固定虚拟 IP / DNS 名）</text>
+
+        <text x="340" y="112" text-anchor="middle" font-size="11" fill="#5b6478">背后可能有多个 Pod 副本，Kubernetes 自动转发流量</text>
+
+        <line x1="280" y1="94" x2="180" y2="175" stroke="#9aa4bf" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow1)"/>
+        <line x1="400" y1="94" x2="490" y2="175" stroke="#9aa4bf" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow1)"/>
+
+        <rect x="50" y="130" width="270" height="190" rx="10" fill="none" stroke="#7c3aed" stroke-width="1.5"/>
+        <text x="65" y="150" font-size="12" font-weight="700" fill="#7c3aed">Node 1（物理机 / 虚拟机）</text>
+        <rect x="95" y="175" width="170" height="110" rx="8" fill="#2563eb"/>
+        <text x="180" y="194" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">Pod（副本 1）</text>
+        <rect x="115" y="210" width="130" height="55" rx="6" fill="#ffffff" stroke="#c7d2fe" stroke-width="1"/>
+        <text x="180" y="233" text-anchor="middle" font-size="11" font-weight="600" fill="#1c2333">container</text>
+        <text x="180" y="249" text-anchor="middle" font-size="10.5" fill="#5b6478">natter-api</text>
+
+        <rect x="360" y="130" width="270" height="190" rx="10" fill="none" stroke="#7c3aed" stroke-width="1.5"/>
+        <text x="375" y="150" font-size="12" font-weight="700" fill="#7c3aed">Node 2（物理机 / 虚拟机）</text>
+        <rect x="405" y="175" width="170" height="110" rx="8" fill="#2563eb"/>
+        <text x="490" y="194" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">Pod（副本 2）</text>
+        <rect x="425" y="210" width="130" height="55" rx="6" fill="#ffffff" stroke="#c7d2fe" stroke-width="1"/>
+        <text x="490" y="233" text-anchor="middle" font-size="11" font-weight="600" fill="#1c2333">container</text>
+        <text x="490" y="249" text-anchor="middle" font-size="10.5" fill="#5b6478">natter-api</text>
+
+        <text x="340" y="337" text-anchor="middle" font-size="11" fill="#5b6478">某个 Pod 或 Node 挂了，Kubernetes 会在别处重建 Pod，Service 的地址始终不变</text>
+      </svg>
+      <figcaption>图 10-1：Node、Pod、Container、Service 的关系——Service 是稳定不变的"门牌号"，背后的 Pod 可以随时增减、漂移</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#16a34a"></span>Service（固定虚拟 IP/DNS）</span>
+        <span><span class="dot" style="background:#2563eb"></span>Pod（应用副本）</span>
+        <span><span class="dot" style="background:#7c3aed"></span>Node（物理机/虚拟机）</span>
+      </div>
+    </figure>
+
+    <h2 id="s2"><span class="num">10.2</span>把 Natter 容器化并部署到 Kubernetes</h2>
+    <p>
+      在正式让 Kubernetes 接管之前，得先把 Natter 的每一个组件打包成 <strong>Docker 容器镜像</strong>。
+      本章要处理三个组件：H2 数据库、Natter API 本体，以及新增的 link-preview 微服务。容器镜像
+      通过 <code class="inline">Dockerfile</code> 描述如何一步步搭建：从一个基础镜像（比如某个 Linux
+      发行版）开始，逐条命令安装依赖、配置权限，最后打包成一个可以到处运行的"快照"。
+    </p>
+    <p>
+      本项目原书用一个<strong>多阶段构建（multistage build）</strong>的 Dockerfile 来打包 H2 数据库：
+      第一阶段用一个带 <code class="inline">curl</code> 的镜像去下载、校验 H2 的发行包；第二阶段切换到
+      Google 的 <code class="inline">distroless</code> 极简基础镜像（连 shell 都没有），只把编译好的
+      H2 服务端文件拷贝进去。这样做的好处是最终镜像里几乎没有攻击者可以利用的多余工具——就算容器被攻破，
+      攻击者手里也没有 <code class="inline">curl</code>、没有包管理器，能干的坏事非常有限。
+    </p>
+    <div class="callout tip">
+      <div class="title">✅ 容器加固的几个通用套路</div>
+      <p>
+        1）用最小化基础镜像（distroless / Alpine），减少攻击面；2）用多阶段构建，构建工具不进最终镜像；
+        3）容器里不要用 root 用户跑进程；4）文件系统尽量只读，需要写的地方单独挂载卷。
+        这几条几乎适用于任何语言写的服务，不只是 Java。
+      </p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch10/docker/h2/Dockerfile</div>
+        <pre><code>FROM curlimages/curl:7.66.0 AS build-env
+
+ENV RELEASE h2-2018-03-18.zip
+ENV SHA256 a45e7824b4f54f5d9d65fb89f22e1e75ecadb15ea4dcf8c5d432b80af59ea759
+
+WORKDIR /tmp
+
+RUN echo "$SHA256  $RELEASE" > $RELEASE.sha256 && \
+    curl -sSL https://www.h2database.com/$RELEASE -o $RELEASE && \
+    sha256sum -b -c $RELEASE.sha256 && \
+    unzip $RELEASE && rm -f $RELEASE
+
+# 第二阶段：切到极简的 distroless 镜像，只拷贝需要的文件
+FROM gcr.io/distroless/java:11
+WORKDIR /opt
+COPY --from=build-env /tmp/h2/bin /opt/h2
+
+# 用非 root 用户运行
+USER 1000:1000
+
+EXPOSE 9092
+ENTRYPOINT ["java", "-Djava.security.egd=file:/dev/urandom", \
+        "-cp", "/opt/h2/h2-1.4.197.jar", \
+        "org.h2.tools.Server", "-tcp", "-tcpAllowOthers"]</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">docker/django/Dockerfile（教学示例）</div>
+        <pre><code># 第一阶段：安装依赖
+FROM python:3.12-slim AS build-env
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# 第二阶段：只拷贝安装好的依赖和源码，基础镜像同样保持精简
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=build-env /install /usr/local
+COPY . .
+
+# 创建专用的非特权用户，不用 root 跑 gunicorn
+RUN addgroup --system natter && adduser --system --ingroup natter natter
+USER natter:natter
+
+EXPOSE 8000
+ENTRYPOINT ["gunicorn", "natter.wsgi:application", \
+        "--bind", "0.0.0.0:8000", "--workers", "2"]</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">docker/hono/Dockerfile（教学示例）</div>
+        <pre><code># 第一阶段：只安装生产依赖
+FROM node:20-slim AS build-env
+WORKDIR /app
+COPY package*.json .
+RUN npm ci --omit=dev
+
+# 第二阶段：distroless 的 Node 镜像默认就以非 root 用户运行
+FROM gcr.io/distroless/nodejs20-debian12
+WORKDIR /app
+COPY --from=build-env /app/node_modules ./node_modules
+COPY . .
+
+USER 65532:65532
+
+EXPOSE 4567
+ENTRYPOINT ["src/index.js"]</code></pre>
+      </div>
+    </div>
+
+    <p>
+      镜像打包好之后，就该轮到 Kubernetes 出场了。第一步是建一个专属的 <strong>namespace（命名空间）</strong>，
+      把 Natter 相关的所有 Pod、Service 都装在里面，方便后面统一做网络隔离。接着为数据库和 API
+      分别写 <strong>Deployment</strong>（描述要跑几个副本、用哪个镜像、加哪些安全限制）和
+      <strong>Service</strong>（暴露一个稳定地址给别的 Pod 访问）配置文件。
+    </p>
+    <p>
+      Deployment 里最值得注意的是 <code class="inline">securityContext</code> 这一段——它相当于给容器戴上
+      "紧箍咒"：<code class="inline">runAsNonRoot: true</code> 保证容器不会以 root 身份运行；
+      <code class="inline">allowPrivilegeEscalation: false</code> 禁止进程通过 set-UID 之类的手段提权；
+      <code class="inline">readOnlyRootFilesystem: true</code> 让整个文件系统只读，攻击者就算进来了也改不了
+      系统文件；<code class="inline">capabilities: drop: [all]</code> 把 Linux 里那些"接近 root 但没那么
+      夸张"的特权（Linux capabilities，跟第 9 章讲的 capability 令牌完全是两回事）全部收走。就算容器真的被
+      攻破，这些限制也能大大缩小攻击者能造成的破坏范围。
+    </p>
+    <div class="callout warn">
+      <div class="title">⚠️ imagePullPolicy: Never 只是本地开发的权宜之计</div>
+      <p>
+        示例里用 <code class="inline">imagePullPolicy: Never</code> 是因为本地开发直接把镜像构建进了
+        Minikube 自己的 Docker 守护进程，不需要去远程仓库拉取。在真正的生产环境里，你应该把镜像推送到
+        一个正规的镜像仓库（Docker Hub 或私有仓库），并让镜像经过漏洞扫描后再上线。
+      </p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch10/kubernetes/natter-api-deployment.yaml + natter-api-service.yaml</div>
+        <pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: natter-api-deployment
+  namespace: natter-api
+spec:
+  selector:
+    matchLabels:
+      app: natter-api
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: natter-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: natter-api
+          image: apisecurityinaction/natter-api:latest
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - all
+          ports:
+            - containerPort: 4567
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: natter-api-service
+  namespace: natter-api
+spec:
+  type: NodePort
+  selector:
+    app: natter-api
+  ports:
+    - protocol: TCP
+      port: 4567
+      nodePort: 30567</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">kubernetes/django-api-deployment.yaml（教学示例，同样的安全上下文 + 健康检查探针）</div>
+        <pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-api-deployment
+  namespace: natter-api
+spec:
+  selector:
+    matchLabels:
+      app: django-api
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: django-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: django-api
+          image: registry.example.com/django-api:latest
+          env:
+            - name: DJANGO_SETTINGS_MODULE
+              value: natter.settings.production
+            - name: DATABASE_URL
+              value: postgres://natter@natter-database-service:5432/natter
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["all"]
+          ports:
+            - containerPort: 8000
+          # 就绪探针：还没准备好之前不接流量
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 8000
+            initialDelaySeconds: 3
+          # 存活探针：探测失败 Kubernetes 会重启这个 Pod
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: 8000
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-api-service
+  namespace: natter-api
+spec:
+  type: NodePort
+  selector:
+    app: django-api
+  ports:
+    - protocol: TCP
+      port: 8000
+      nodePort: 30567</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">kubernetes/hono-api-deployment.yaml（教学示例）</div>
+        <pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hono-api-deployment
+  namespace: natter-api
+spec:
+  selector:
+    matchLabels:
+      app: hono-api
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: hono-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: hono-api
+          image: registry.example.com/hono-api:latest
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DATABASE_URL
+              value: postgres://natter@natter-database-service:5432/natter
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["all"]
+          ports:
+            - containerPort: 4567
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4567
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4567
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hono-api-service
+  namespace: natter-api
+spec:
+  type: NodePort
+  selector:
+    app: hono-api
+  ports:
+    - protocol: TCP
+      port: 4567
+      nodePort: 30567</code></pre>
+      </div>
+    </div>
+    <div class="callout note">
+      <div class="title">💡 探针（Probe）是干什么的</div>
+      <p>
+        原书 Java 版的 YAML 里没有加探针，为了不改变原书代码这里也如实照抄；但在真实的生产部署里，
+        几乎总会给应用配上 <code class="inline">readinessProbe</code>（还没准备好之前不接流量，比如数据库
+        连接还没建好）和 <code class="inline">livenessProbe</code>（进程卡死了就重启这个 Pod）。
+        Django/Hono 的示例特意加上了这两项，提醒你在自己的项目里也该配置它们。
+      </p>
+    </div>
+
+    <p>
+      Natter API 本体的镜像用 Google 的 <strong>Jib</strong> Maven 插件构建，不需要手写 Dockerfile，
+      只要在 <code class="inline">pom.xml</code> 里配置好基础镜像、暴露端口和运行用户即可。部署前还要把
+      JDBC 连接串从本地内存数据库改成指向刚部署好的数据库 Service：
+    </p>
+    <pre class="plain"><code>var jdbcUrl = "jdbc:h2:tcp://natter-database-service:9092/mem:natter";</code></pre>
+    <p>
+      注意这里用的是 <strong>Service 的 DNS 名字</strong>，而不是某个具体 Pod 的 IP——这正是上一节讲的
+      "稳定门牌号"的好处：数据库 Pod 换到哪个 Node、重启过多少次，Natter API 都不用关心。
+
+    </p>
+
+    <h2 id="s3"><span class="num">10.2.4</span>新增 link-preview 微服务</h2>
+    <p>
+      接下来要给 Natter 加一个新功能：用户发消息时如果带了链接，就自动抓取链接页面的
+      <a href="https://ogp.me" target="_blank" rel="noopener">Open Graph</a> 元数据（标题、简介、缩略图），
+      做成一个"链接预览"卡片。这个功能被设计成一个<strong>独立的微服务</strong>，而不是塞进主 API 里，
+      理由并不只是"团队分工"，更重要的是一个安全考量：
+    </p>
+    <div class="callout note">
+      <div class="title">💡 什么是特权分离（privilege separation）</div>
+      <p>
+        "抓取并解析来自公网任意 URL 的内容"本质上是一件有风险的事——你完全不知道对方服务器会返回什么。
+        把这个高风险操作单独拆到一个独立进程/独立 Pod 里运行，即使它出了问题（被攻破、被骗着发起恶意请求），
+        影响范围也被限制在这个小服务本身，不会直接牵连到存有用户账号、消息数据的主 Natter API 和数据库。
+        这种"把风险操作单独隔离出去，用最小权限运行"的设计思路就叫<strong>特权分离</strong>。
+      </p>
+    </div>
+    <p>
+      link-preview 服务的最初版本非常直白：拿到 <code class="inline">url</code> 查询参数，直接用 jsoup 库
+      去抓取并解析：
+    </p>
+    <pre class="plain"><code>get("/preview", (request, response) -> {
+    var url = request.queryParams("url");
+    var doc = Jsoup.connect(url).timeout(3000).get();   // 直接抓取，未做任何校验！
+    var title = doc.title();
+    var desc = doc.head().selectFirst("meta[property='og:description']");
+    var img = doc.head().selectFirst("meta[property='og:image']");
+    return new JSONObject()
+            .put("url", doc.location())
+            .putOpt("title", title)
+            .putOpt("description", desc == null ? null : desc.attr("content"))
+            .putOpt("image", img == null ? null : img.attr("content"));
+});</code></pre>
+    <p>
+      主 Natter API 在返回消息时，会用一个正则表达式扫描消息文本里形如 <code class="inline">http(s)://...</code>
+      的链接，逐个调用这个新服务：
+    </p>
+    <pre class="plain"><code>private final URI linkPreviewService =
+        URI.create("http://natter-link-preview-service:4567");
+
+private JSONObject fetchLinkPreview(String link) {
+    var url = linkPreviewService.resolve("/preview?url=" +
+            URLEncoder.encode(link, StandardCharsets.UTF_8));
+    var request = HttpRequest.newBuilder(url).GET().build();
+    try {
+        var response = httpClient.send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 200) {
+            return new JSONObject(response.body());
+        }
+    } catch (Exception ignored) { }
+    return null;
+}</code></pre>
+    <p>
+      跑起来效果很好——发一条带 BBC 新闻链接的消息，读消息的时候就能看到自动抓来的标题、简介和配图。
+      但这段代码里埋了一个大坑：它会<strong>无条件地把任何用户提交的 URL 发出去请求</strong>，接下来两节
+      就是关于怎么把这个坑填上。
+    </p>
+
+    <h2 id="s4"><span class="num">10.2.7</span>防止 SSRF 攻击</h2>
+    <p>
+      设想一个恶意用户在 Natter 里发了一条消息，链接不是指向 BBC，而是指向 Kubernetes 集群<strong>内部</strong>
+      的某个地址，比如 <code class="inline">http://192.168.0.1/admin</code>。link-preview 服务运行在
+      集群内部，它替这个用户去"看了一眼"这个内部地址——而这个地址，攻击者自己在集群外面根本连不到。
+      这就是<strong>服务端请求伪造（Server-Side Request Forgery，SSRF）</strong>攻击。
+    </p>
+    <div class="callout danger">
+      <div class="title">☠️ 什么是 SSRF，为什么它很危险</div>
+      <p>
+        SSRF 攻击利用的是"服务器帮我发请求"这件事本身：攻击者提交一个自己够不着的内网地址，诱导服务器
+        代替他发出请求，再把响应内容（哪怕只是"标题""简介"这种看似无害的字段）返回给攻击者，间接实现了
+        窥探内网、探测哪些服务在运行、甚至直接调用内部管理接口的效果。2019 年 Capital One 的数据泄露事件
+        就源于一个 SSRF 漏洞——攻击者通过它访问了 AWS 内部的元数据服务，拿到了访问云存储的凭证，最终
+        窃取了上亿用户的个人信息。
+      </p>
+    </div>
+    <figure class="diagram">
+      <svg viewBox="0 0 700 280" role="img" aria-label="SSRF 攻击时序图">
+        <defs>
+          <marker id="arrow2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="130" height="36" rx="8" fill="#dc2626"/>
+        <text x="85" y="33" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">攻击者</text>
+        <rect x="280" y="10" width="170" height="36" rx="8" fill="#16a34a"/>
+        <text x="365" y="33" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">link-preview API</text>
+        <rect x="540" y="10" width="140" height="36" rx="8" fill="#7c3aed"/>
+        <text x="610" y="33" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">内网目标服务</text>
+
+        <line x1="85" y1="46" x2="85" y2="255" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="365" y1="46" x2="365" y2="255" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="610" y1="46" x2="610" y2="255" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="90" y1="90" x2="358" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="225" y="82" text-anchor="middle" font-size="11.5" fill="#1c2333">① 发消息，链接 url=http://192.168.0.1/admin</text>
+
+        <line x1="372" y1="134" x2="605" y2="134" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="490" y="126" text-anchor="middle" font-size="11.5" fill="#1c2333">② 未做任何校验，直接 GET http://192.168.0.1/admin</text>
+
+        <line x1="605" y1="178" x2="372" y2="178" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="490" y="170" text-anchor="middle" font-size="11.5" fill="#1c2333">③ 200 OK，返回内部管理页面 HTML</text>
+
+        <line x1="358" y1="222" x2="90" y2="222" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="225" y="214" text-anchor="middle" font-size="11.5" fill="#1c2333">④ 把内网数据当预览返回：title / description</text>
+      </svg>
+      <figcaption>图 10-2：攻击者提交一个内网地址，link-preview 服务替他去"探路"，把内网数据当作"链接预览"泄露出来</figcaption>
+    </figure>
+    <p>防御 SSRF 有两种思路：</p>
+    <ul>
+      <li><strong>允许列表（allowlist）</strong>：只允许访问一份明确列出的、受信任的域名/URL。这是最安全的做法，
+        但对 link-preview 这种"要能预览互联网上任意网页"的场景不现实——你不可能把全世界的网站都列出来。</li>
+      <li><strong>阻止列表（blocklist）</strong>：不限制能访问哪些外部地址，但明确拒绝访问内网/私有地址段。
+        这是退而求其次的方案：更容易漏掉某个地址段，也可能因为新增内部服务而过时，只有在允许列表不现实
+        时才使用。</li>
+    </ul>
+    <div class="callout tip">
+      <div class="title">✅ 需要拉黑的几类地址</div>
+      <p>
+        环回地址（127.0.0.1 等，指向本机自己）、链路本地地址（169.254.0.0/16、IPv6 的 fe80::/10）、
+        私有地址段（10.0.0.0/8、172.16.0.0/12、192.168.0.0/16，以及 IPv6 的唯一本地地址 fd00::/8）、
+        组播地址、以及 0.0.0.0 这种通配地址。一个域名可能解析出多个 IP，<strong>要把每一个都校验一遍</strong>。
+      </p>
+    </div>
+    <p>
+      光校验用户提交的第一个 URL 还不够：如果目标网站返回一个 HTTP 重定向（3xx），HTTP 客户端默认会
+      自动跟着跳转过去，而跳转后的地址完全没有经过校验。所以还要关掉客户端的自动跳转，自己在一个循环里
+      逐跳校验。下面的 Java 代码就是这两步的完整实现，来自本章真实的 <code class="inline">LinkPreviewer.java</code>：
+    </p>
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch10/src/main/java/.../LinkPreviewer.java</div>
+        <pre><code>private static Document fetch(String url) throws IOException {
+    Document doc = null;
+    var retries = 0;
+    while (doc == null && retries++ < 10) {
+        if (isBlockedAddress(url)) {
+            throw new IllegalArgumentException(
+                    "URL refers to local/private address");
+        }
+        var res = Jsoup.connect(url).followRedirects(false)
+                .timeout(3000).method(GET).execute();
+        if (res.statusCode() / 100 == 3) {
+            url = res.header("Location");        // 拿到跳转目标，回到循环开头重新校验
+        } else {
+            doc = res.parse();
+        }
+    }
+    if (doc == null) throw new IOException("too many redirects");
+    return doc;
+}
+
+private static boolean isBlockedAddress(String uri)
+        throws UnknownHostException {
+    var host = URI.create(uri).getHost();
+    for (var ipAddr : InetAddress.getAllByName(host)) {
+        if (ipAddr.isLoopbackAddress() ||
+                ipAddr.isLinkLocalAddress() ||
+                ipAddr.isSiteLocalAddress() ||
+                ipAddr.isMulticastAddress() ||
+                ipAddr.isAnyLocalAddress() ||
+                isUniqueLocalAddress(ipAddr)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+private static boolean isUniqueLocalAddress(InetAddress ipAddr) {
+    return ipAddr instanceof Inet6Address &&
+            (ipAddr.getAddress()[0] & 0xFF) == 0xFD &&
+            (ipAddr.getAddress()[1] & 0xFF) == 0X00;
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">link_preview/utils.py（教学示例）</div>
+        <pre><code>import ipaddress
+import socket
+from urllib.parse import urlparse
+
+import requests
+
+
+def is_blocked_address(url: str) -> bool:
+    """域名解析出的每一个 IP 都要检查，只要有一个落在内网/私有段就拒绝。"""
+    host = urlparse(url).hostname
+    for family, _, _, _, sockaddr in socket.getaddrinfo(host, None):
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (ip.is_loopback or ip.is_link_local or ip.is_private or
+                ip.is_multicast or ip.is_unspecified or ip.is_reserved):
+            return True
+    return False
+
+
+def fetch(url: str, max_redirects: int = 10) -> requests.Response:
+    """关掉 requests 的自动跳转，自己在循环里逐跳校验，防止跳转到内网地址。"""
+    for _ in range(max_redirects):
+        if is_blocked_address(url):
+            raise ValueError("URL 指向内网/私有地址")
+        resp = requests.get(url, timeout=3, allow_redirects=False)
+        if resp.is_redirect:
+            url = resp.headers["Location"]
+            continue
+        return resp
+    raise ValueError("重定向次数过多")</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/services/linkPreview.ts（教学示例）</div>
+        <pre><code>import ipaddr from "ipaddr.js";
+import dns from "node:dns/promises";
+
+const BLOCKED_RANGES = [
+  "loopback", "linkLocal", "private",
+  "multicast", "unspecified", "uniqueLocal", "reserved",
+];
+
+async function isBlockedAddress(hostname: string): Promise<boolean> {
+  const records = await dns.lookup(hostname, { all: true });
+  return records.some(({ address }) =>
+    BLOCKED_RANGES.includes(ipaddr.parse(address).range())
+  );
+}
+
+export async function fetchPreview(url: string, maxRedirects = 10) {
+  for (let i = 0; i < maxRedirects; i++) {
+    const { hostname } = new URL(url);
+    if (await isBlockedAddress(hostname)) {
+      throw new Error("URL 指向内网/私有地址");
+    }
+    // redirect: "manual" 关掉 fetch 的自动跳转，自己接管每一跳
+    const res = await fetch(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+      url = res.headers.get("location")!;
+      continue;
+    }
+    return res;
+  }
+  throw new Error("重定向次数过多");
+}</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s5"><span class="num">10.2.8</span>更狡猾的对手：DNS rebinding 攻击</h2>
+    <p>
+      前面的校验看起来已经很严密了：域名解析出的每个 IP 都查过，重定向也逐跳校验了。但还有一种攻击能
+      绕过这一切——<strong>DNS rebinding（DNS 重绑定）</strong>。
+    </p>
+    <div class="callout danger">
+      <div class="title">☠️ 什么是 DNS rebinding</div>
+      <p>
+        攻击者注册一个自己控制 DNS 的域名，比如 <code class="inline">evil.com</code>。当 link-preview
+        服务做安全校验、查询 <code class="inline">evil.com</code> 解析到哪个 IP 时，攻击者的 DNS 服务器
+        故意返回一个<strong>正常的公网 IP</strong>（并把 TTL 设成 0，不让结果被缓存），校验自然通过。
+        但紧接着，当 HTTP 客户端真正发起连接、再次查询 <code class="inline">evil.com</code> 时，
+        攻击者的 DNS 服务器"变脸"了，这次返回的是一个<strong>内网 IP</strong>。因为两次 DNS 查询是
+        分开发生的，"校验用的 IP"和"实际连接用的 IP"完全可能不是同一个。
+      </p>
+    </div>
+    <figure class="diagram">
+      <svg viewBox="0 0 760 370" role="img" aria-label="DNS rebinding 攻击时序图">
+        <defs>
+          <marker id="arrow3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="10" y="10" width="110" height="36" rx="8" fill="#dc2626"/>
+        <text x="65" y="33" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">攻击者</text>
+        <rect x="170" y="10" width="170" height="36" rx="8" fill="#16a34a"/>
+        <text x="255" y="33" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">link-preview API</text>
+        <rect x="390" y="10" width="170" height="36" rx="8" fill="#d97706"/>
+        <text x="475" y="33" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">攻击者控制的 DNS</text>
+        <rect x="600" y="10" width="150" height="36" rx="8" fill="#7c3aed"/>
+        <text x="675" y="33" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">内网目标服务</text>
+
+        <line x1="65" y1="46" x2="65" y2="345" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="255" y1="46" x2="255" y2="345" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="475" y1="46" x2="475" y2="345" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="675" y1="46" x2="675" y2="345" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="70" y1="85" x2="248" y2="85" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="160" y="77" text-anchor="middle" font-size="11" fill="#1c2333">① 提交链接 url=http://evil.com/admin</text>
+
+        <line x1="262" y1="123" x2="468" y2="123" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="365" y="115" text-anchor="middle" font-size="11" fill="#1c2333">② 校验前先查询 DNS：evil.com 是谁？</text>
+
+        <line x1="468" y1="161" x2="262" y2="161" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="365" y="153" text-anchor="middle" font-size="11" fill="#1c2333">③ 返回真实公网 IP，ttl=0（不缓存）→ 校验通过</text>
+
+        <line x1="262" y1="199" x2="468" y2="199" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="365" y="191" text-anchor="middle" font-size="11" fill="#1c2333">④ 发起真正的 HTTP 请求，HTTP 库内部再次解析 evil.com</text>
+
+        <line x1="468" y1="237" x2="262" y2="237" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="365" y="229" text-anchor="middle" font-size="11" fill="#1c2333">⑤ 这一次返回内网 IP：192.168.0.1</text>
+
+        <line x1="262" y1="275" x2="668" y2="275" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="465" y="267" text-anchor="middle" font-size="11" fill="#1c2333">⑥ 请求实际被发到了内网目标服务</text>
+
+        <line x1="668" y1="313" x2="262" y2="313" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <text x="465" y="305" text-anchor="middle" font-size="11" fill="#1c2333">⑦ 返回内网敏感数据，被当作"链接预览"处理</text>
+      </svg>
+      <figcaption>图 10-3：DNS rebinding 攻击——"校验时解析"和"真正连接时解析"是两次独立的 DNS 查询，攻击者利用这个时间差调包</figcaption>
+    </figure>
+    <p>书里给出的防御思路有三条，第一条最直接、成本也最低：</p>
+    <ol>
+      <li><strong>严格校验 Host header</strong>：如果收到的请求 Host 头不是自己预期的那几个值，直接拒绝。
+        这不能阻止 link-preview 自己发起的出站请求被 rebinding，但能保护 Natter API、link-preview
+        这些服务<strong>自己不被</strong>当作 rebinding 的内网目标去接收伪造请求。</li>
+      <li><strong>给内部通信全部启用 TLS</strong>：如果目标要求 TLS，证书上的域名跟实际连接到的服务对不上，
+        握手就会失败——第 10.3 节会讲怎么用 service mesh 自动做到这一点。</li>
+      <li><strong>在网络层面拦截</strong>：一些 DNS 服务器/防火墙可以配置成直接过滤掉"解析结果是内网 IP"的
+        外部 DNS 响应，从根源上掐断 rebinding。</li>
+    </ol>
+    <p>本章 Java 代码里真实落地的是第一条——在 <code class="inline">Main.java</code> 和 <code class="inline">LinkPreviewer.java</code> 里都加了一个 Host header 白名单过滤器：</p>
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch10/src/main/java/.../LinkPreviewer.java</div>
+        <pre><code>var expectedHostNames = Set.of(
+        "natter-link-preview-service:4567",
+        "natter-link-preview-service.natter-api:4567");
+before((request, response) -> {
+    if (!expectedHostNames.contains(request.host())) {
+        halt(400);
+    }
+});</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">natter/settings/production.py</div>
+        <pre><code>ALLOWED_HOSTS = [
+    "natter-link-preview-service",
+    "natter-link-preview-service.natter-api",
+    "natter-link-preview-service.natter-api.svc.cluster.local",
+]
+
+# Django 内置的 CommonMiddleware 会在每个请求上自动校验
+# Host header 是否在 ALLOWED_HOSTS 里，不匹配就直接返回
+# 400 Bad Request——等价于 Spark 里手写的 before() 过滤器，
+# 但不用你自己写代码，只要配置好 settings.py 即可。</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/hostCheck.ts</div>
+        <pre><code>import type { MiddlewareHandler } from "hono";
+
+const EXPECTED_HOSTS = new Set([
+  "natter-link-preview-service:4567",
+  "natter-link-preview-service.natter-api:4567",
+]);
+
+export const checkHost: MiddlewareHandler = async (c, next) => {
+  const host = c.req.header("host");
+  if (!host || !EXPECTED_HOSTS.has(host)) {
+    return c.text("Bad Request", 400);
+  }
+  await next();
+};
+
+// app.use("*", checkHost);</code></pre>
+      </div>
+    </div>
+    <p>
+      光校验 Host header 只解决了"别人拿伪造请求冒充内部服务打进来"的问题，并不能让 link-preview
+      对外发起的请求彻底免疫 rebinding。要更彻底地堵住这个洞，社区里更常见的做法是：<strong>域名解析
+      一次、拿到 IP 之后就把这个 IP"钉死"，真正发请求的时候强制连接这个 IP，不再让 HTTP 客户端自己
+      重新做一次域名解析</strong>——这样攻击者的 DNS 服务器就算"变脸"，也来不及影响已经建立的连接。
+    </p>
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch10/src/main/java/.../LinkPreviewer.java（说明，非新增代码）</div>
+        <pre><code>// 本章 Java 代码（上面的 fetch() / isBlockedAddress()）并没有把
+// "校验 IP" 和 "真正发起连接" 绑定到同一个 socket 上：它是在循环的
+// 每一次迭代里，先调用 isBlockedAddress() 触发一次 DNS 解析做校验，
+// 再调用 Jsoup.connect(url)，这一步 jsoup 内部会自己再解析一次域名。
+// 两次解析之间仍然有一个很短的竞态窗口，理论上不是 100% 免疫 rebinding。
+//
+// 书中给出的更彻底方案是本节前面两条真实存在的机制：
+//   1. 严格校验 Host header（见上一个对比块）
+//   2. 给内部调用全部启用 TLS（见 10.3 节），证书域名和实际连接目标
+//      强绑定，rebinding 到内网地址会导致证书校验失败
+//
+// 右侧 Python / JS 栏演示的是社区里另一种常见的深度防御手段——
+// "解析后固定 IP"（connection pinning），可以在书中方案之上再加一层。</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">link_preview/pinned.py（教学示例）</div>
+        <pre><code>import ipaddress
+import socket
+from urllib.parse import urlparse
+
+import requests
+from requests.adapters import HTTPAdapter
+
+
+def resolve_and_validate(hostname: str) -> str:
+    """只解析这一次，校验通过后把这个 IP 冻结下来，
+    后面真正发请求时也用同一个 IP，不再让 requests 重新解析域名。"""
+    infos = socket.getaddrinfo(hostname, None)
+    ips = {info[4][0] for info in infos}
+    for ip in ips:
+        addr = ipaddress.ip_address(ip)
+        if (addr.is_loopback or addr.is_link_local or addr.is_private or
+                addr.is_multicast or addr.is_unspecified or addr.is_reserved):
+            raise ValueError(f"{hostname} 解析到了内网地址 {ip}")
+    return next(iter(ips))
+
+
+class PinnedIPAdapter(HTTPAdapter):
+    """强制这次请求连接到指定 IP，而不是重新对 hostname 做 DNS 解析。"""
+    def __init__(self, pinned_ip: str, **kwargs):
+        self.pinned_ip = pinned_ip
+        super().__init__(**kwargs)
+
+    def get_connection(self, url, proxies=None):
+        pool = super().get_connection(url, proxies)
+        pool.host = self.pinned_ip   # 连接目标改成已校验过的 IP
+        return pool
+
+
+def fetch_pinned(url: str) -> requests.Response:
+    hostname = urlparse(url).hostname
+    pinned_ip = resolve_and_validate(hostname)
+
+    session = requests.Session()
+    session.mount("http://", PinnedIPAdapter(pinned_ip))
+    session.mount("https://", PinnedIPAdapter(pinned_ip))
+    return session.get(url, timeout=3, allow_redirects=False)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/services/linkPreviewPinned.ts（教学示例）</div>
+        <pre><code>import dns from "node:dns/promises";
+import { Agent, fetch } from "undici";
+import ipaddr from "ipaddr.js";
+
+async function resolveAndValidate(hostname: string): Promise<string> {
+  const records = await dns.lookup(hostname, { all: true });
+  for (const { address } of records) {
+    const range = ipaddr.parse(address).range();
+    if (["loopback", "linkLocal", "private", "multicast",
+         "unspecified", "uniqueLocal", "reserved"].includes(range)) {
+      throw new Error(`${hostname} 解析到了内网地址 ${address}`);
+    }
+  }
+  return records[0].address;
+}
+
+export async function fetchPinned(url: string) {
+  const { hostname } = new URL(url);
+  const pinnedIp = await resolveAndValidate(hostname);
+
+  // 自定义 lookup，把连接钉死在刚刚校验过的 IP 上，
+  // fetch 内部不会再对 hostname 做第二次 DNS 解析
+  const agent = new Agent({
+    connect: { lookup: (_host, _opts, cb) => cb(null, pinnedIp, 4) },
+  });
+
+  return fetch(url, {
+    dispatcher: agent,
+    redirect: "manual",
+    signal: AbortSignal.timeout(3000),
+  });
+}</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s6"><span class="num">10.3</span>用 TLS 保护微服务之间的通信</h2>
+    <p>
+      Pod 之间默认是明文通信的，而且 Kubernetes 集群内部通常没有传统意义上的"网络分段"——一旦攻击者拿到了
+      集群内某个节点的权限，理论上就能监听到所有 Pod 之间的流量，包括数据库密码这类敏感信息。解决办法是
+      给所有内部通信都套上 TLS。
+    </p>
+    <p>
+      问题是，手动给每个微服务签发证书、分发私钥、定期轮换、处理吊销……这一整套<strong>公钥基础设施
+      （PKI）</strong>的运维工作量相当可观，在 Pod 随时增减的 Kubernetes 环境里更是难以手工维护。
+      于是就有了 <strong>service mesh（服务网格）</strong>这类工具来自动化这件事，本章用的是
+      <a href="https://linkerd.io" target="_blank" rel="noopener">Linkerd</a>。
+    </p>
+    <div class="callout note">
+      <div class="title">💡 Service mesh 是怎么工作的</div>
+      <p>
+        Service mesh 会给每个 Pod 偷偷塞进一个 <strong>sidecar（边车）代理容器</strong>。这个代理会拦截
+        所有进出这个 Pod 的网络流量：应用容器本身还是用最简单的明文 HTTP 通信，代理在背后自动把它升级成
+        TLS（甚至是双向认证的 mTLS）。整个过程对应用代码完全透明——你不需要改一行 Natter 的业务逻辑，
+        只要在 namespace 上加一个 <code class="inline">linkerd.io/inject: enabled</code> 注解，
+        重启一下 Pod，所有内部通信就自动变成加密的了。
+      </p>
+    </div>
+    <figure class="diagram">
+      <svg viewBox="0 0 640 300" role="img" aria-label="Service mesh 使用 sidecar 代理自动加密微服务间通信">
+        <defs>
+          <marker id="arrow4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="250" y="10" width="140" height="40" rx="8" fill="#0891b2"/>
+        <text x="320" y="27" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">CA（控制平面）</text>
+        <text x="320" y="42" text-anchor="middle" fill="#fff" font-size="10.5">自动签发并轮换证书</text>
+
+        <line x1="285" y1="50" x2="165" y2="190" stroke="#9aa4bf" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow4)"/>
+        <line x1="355" y1="50" x2="480" y2="190" stroke="#9aa4bf" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow4)"/>
+
+        <rect x="40" y="90" width="240" height="170" rx="10" fill="none" stroke="#5b6478" stroke-width="1.5"/>
+        <text x="52" y="108" font-size="12" font-weight="700" fill="#1c2333">Pod: natter-api</text>
+        <rect x="60" y="120" width="200" height="50" rx="6" fill="#2563eb"/>
+        <text x="160" y="140" text-anchor="middle" fill="#fff" font-size="11">app 容器 (natter-api)</text>
+        <text x="160" y="155" text-anchor="middle" fill="#fff" font-size="10.5">HTTP（明文）</text>
+        <line x1="160" y1="170" x2="160" y2="190" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow4)"/>
+        <rect x="60" y="190" width="200" height="50" rx="6" fill="#d97706"/>
+        <text x="160" y="210" text-anchor="middle" fill="#fff" font-size="11">sidecar 代理</text>
+        <text x="160" y="225" text-anchor="middle" fill="#fff" font-size="10.5">linkerd-proxy</text>
+
+        <rect x="360" y="90" width="240" height="170" rx="10" fill="none" stroke="#5b6478" stroke-width="1.5"/>
+        <text x="372" y="108" font-size="12" font-weight="700" fill="#1c2333">Pod: link-preview</text>
+        <rect x="380" y="120" width="200" height="50" rx="6" fill="#2563eb"/>
+        <text x="480" y="140" text-anchor="middle" fill="#fff" font-size="11">app 容器 (link-preview)</text>
+        <text x="480" y="155" text-anchor="middle" fill="#fff" font-size="10.5">HTTP（明文）</text>
+        <line x1="480" y1="170" x2="480" y2="190" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow4)"/>
+        <rect x="380" y="190" width="200" height="50" rx="6" fill="#d97706"/>
+        <text x="480" y="210" text-anchor="middle" fill="#fff" font-size="11">sidecar 代理</text>
+        <text x="480" y="225" text-anchor="middle" fill="#fff" font-size="10.5">linkerd-proxy</text>
+
+        <line x1="260" y1="215" x2="360" y2="215" stroke="#0891b2" stroke-width="2" marker-end="url(#arrow4)"/>
+        <text x="320" y="203" text-anchor="middle" font-size="11" font-weight="700" fill="#0891b2">mTLS（自动加密 + 双向身份认证）</text>
+      </svg>
+      <figcaption>图 10-4：Linkerd 给每个 Pod 注入一个 sidecar 代理，应用容器仍然只说明文 HTTP，代理之间自动用 mTLS 通信</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>应用容器（明文 HTTP）</span>
+        <span><span class="dot" style="background:#d97706"></span>sidecar 代理</span>
+        <span><span class="dot" style="background:#0891b2"></span>CA / mTLS 连接</span>
+      </div>
+    </figure>
+    <div class="callout warn">
+      <div class="title">⚠️ mTLS 常被误解的地方</div>
+      <p>
+        mTLS（双向 TLS）本身在传输层并不比普通单向 TLS "更安全"——普通 TLS 已经能防住中间人窃听、篡改。
+        mTLS 真正的价值在于：服务器可以拿到一个<strong>经过密码学强认证的客户端身份</strong>（客户端证书），
+        用它来做精细的授权判断，比如"只允许 natter-api 这个身份调用 link-preview 服务"。第 11 章会讲到
+        怎么把 mTLS 的客户端身份和 OAuth2 结合起来做服务间授权。
+      </p>
+    </div>
+
+    <h2 id="s7"><span class="num">10.3.3</span>用网络策略锁定连接</h2>
+    <p>
+      TLS 解决了"内容会不会被偷看/篡改"的问题，但攻击者如果拿下了集群里某个不相关的 Pod，依然可以
+      直接向数据库 Pod 发起连接、暴力尝试密码，或者扫描内网找其他漏洞——这种从一个被攻破的系统跳到
+      下一个系统的过程叫<strong>横向移动（lateral movement）</strong>。
+    </p>
+    <div class="callout tip">
+      <div class="title">✅ 零信任网络：不要因为"来自内网"就信任</div>
+      <p>
+        本章多次提到一个理念——<strong>零信任网络（zero trust）</strong>：不要仅仅因为一个请求来自内部
+        网络就认为它是安全的，所有请求都应该被主动认证和授权。Kubernetes 的<strong>网络策略
+        （NetworkPolicy）</strong>是实现这一理念的一种手段：明确写出"哪些 Pod 允许连接到哪些 Pod 的哪个
+        端口"，其余一律拒绝。
+      </p>
+    </div>
+    <p>
+      下面是书中给出的一份网络策略示例，锁定谁能连接 H2 数据库 Pod（这是 Kubernetes 原生资源，YAML
+      语法本身与用什么语言写业务代码无关，所以这里不需要再拆成三栏）：
+    </p>
+    <pre class="plain"><code>apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-network-policy
+  namespace: natter-api
+spec:
+  podSelector:
+    matchLabels:
+      app: natter-database        # 这条策略作用在数据库 Pod 上
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: natter-api     # 只允许带有 app=natter-api 标签的 Pod 连进来
+      ports:
+        - protocol: TCP
+          port: 9092             # 而且只能连 9092 端口
+  # 没有写 egress 规则 → 数据库 Pod 的所有出站连接都会被拒绝</code></pre>
+    <div class="callout warn">
+      <div class="title">⚠️ Minikube 本地环境不强制执行网络策略</div>
+      <p>
+        用 <code class="inline">kubectl apply</code> 应用这份策略在 Minikube 上不会真正生效，因为它默认的
+        网络组件不支持策略强制。大多数云厂商提供的托管 Kubernetes（GKE/EKS/AKS）都支持，自建集群则需要
+        额外安装 Calico、Cilium 这类网络插件。Istio 这样的 service mesh 还能基于 mTLS 里的服务身份做更
+        细粒度的授权（比如"只允许 GET 方法"），但它不能替代本章前面讲的 SSRF 校验——恶意请求经过代理时
+        看起来和正常请求一样，会被正常放行。
+      </p>
+    </div>
+
+    <h2 id="s8"><span class="num">10.4</span>保护入站请求：Ingress</h2>
+    <p>
+      到目前为止的 TLS/网络策略都是集群<strong>内部</strong>的事。外部客户端（比如浏览器、curl）要访问
+      Natter API，走的是集群边界上的<strong>Ingress 控制器</strong>——本质上是一个反向代理/负载均衡器，
+      负责终止外部的 TLS 连接、做限流、记录访问日志，再把请求转发给内部的 Service。
+    </p>
+    <div class="callout note">
+      <div class="title">💡 Ingress 控制器扮演的角色</div>
+      <p>
+        因为 Ingress 控制器本身也跑在集群里，如果把它也纳入 service mesh，从 Ingress 到后端服务这一段
+        也能自动套上 mTLS——这样就实现了"外部 HTTPS → Ingress → 内部 mTLS → 各微服务"全链路加密。
+      </p>
+    </div>
+    <p>本章真实的 Ingress 配置如下（来自 <code class="inline">ch10/kubernetes/natter-ingress.yaml</code>）：</p>
+    <pre class="plain"><code>apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: api-ingress
+  namespace: natter-api
+  annotations:
+    # 把外部 Host header 改写成内部服务的完整域名，
+    # 这样 Linkerd 才能识别出该给这段连接自动套上 mTLS
+    nginx.ingress.kubernetes.io/upstream-vhost:
+      "$service_name.$namespace.svc.cluster.local:$service_port"
+spec:
+  tls:
+    - hosts:
+        - api.natter.local
+      secretName: natter-tls        # 提前用 kubectl create secret tls 创建好证书/私钥
+  rules:
+    - host: api.natter.local
+      http:
+        paths:
+          - backend:
+              serviceName: natter-api-service
+              servicePort: 4567</code></pre>
+    <p>
+      要让 Ingress 能对外提供 HTTPS，还需要提前把证书和私钥打包成一个 Kubernetes Secret：
+    </p>
+    <pre class="plain"><code>kubectl create secret tls natter-tls -n natter-api \
+  --key=api.natter.local-key.pem --cert=api.natter.local.pem</code></pre>
+    <p>
+      配置生效之后，外部客户端就可以直接用 HTTPS 访问 <code class="inline">api.natter.local</code>，
+      Ingress 负责终止外部 TLS，再通过内部 mTLS 把请求安全地转发给 <code class="inline">natter-api-service</code>。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 780 540" role="img" aria-label="Natter 在 Kubernetes 中的整体部署架构">
+        <defs>
+          <marker id="arrow5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+
+        <rect x="200" y="50" width="560" height="400" rx="14" fill="none" stroke="#9aa4bf" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text x="215" y="72" font-size="12.5" font-weight="700" fill="#5b6478">namespace: natter-api</text>
+
+        <rect x="20" y="170" width="150" height="54" rx="8" fill="#2563eb"/>
+        <text x="95" y="192" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">外部客户端</text>
+        <text x="95" y="208" text-anchor="middle" fill="#fff" font-size="10.5">curl / 浏览器</text>
+
+        <line x1="170" y1="197" x2="230" y2="120" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="185" y="158" font-size="10.5" fill="#1c2333">① HTTPS</text>
+        <text x="185" y="171" font-size="10.5" fill="#1c2333">api.natter.local</text>
+
+        <rect x="230" y="90" width="170" height="54" rx="8" fill="#d97706"/>
+        <text x="315" y="112" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="700">Ingress Controller</text>
+        <text x="315" y="128" text-anchor="middle" fill="#fff" font-size="10.5">NGINX，TLS 终止</text>
+
+        <line x1="400" y1="117" x2="440" y2="117" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="420" y="105" text-anchor="middle" font-size="10" fill="#1c2333">② 转发（Host 改写）</text>
+
+        <rect x="440" y="90" width="210" height="54" rx="27" fill="#16a34a"/>
+        <text x="545" y="112" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Service</text>
+        <text x="545" y="128" text-anchor="middle" fill="#fff" font-size="10">natter-api-service (NodePort)</text>
+
+        <line x1="545" y1="144" x2="545" y2="175" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="558" y="163" font-size="10.5" fill="#1c2333">③</text>
+
+        <rect x="440" y="175" width="210" height="60" rx="8" fill="#2563eb"/>
+        <text x="545" y="200" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Deployment: natter-api</text>
+        <text x="545" y="216" text-anchor="middle" fill="#fff" font-size="10.5">Pod（container: natter-api）</text>
+
+        <line x1="480" y1="235" x2="335" y2="270" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="395" y="248" font-size="10" fill="#1c2333">④ JDBC h2:tcp://...:9092</text>
+
+        <rect x="230" y="270" width="210" height="50" rx="25" fill="#7c3aed"/>
+        <text x="335" y="291" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Service</text>
+        <text x="335" y="306" text-anchor="middle" fill="#fff" font-size="9.5">natter-database-service (ClusterIP)</text>
+
+        <line x1="335" y1="320" x2="335" y2="345" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="348" y="337" font-size="10.5" fill="#1c2333">⑤</text>
+
+        <rect x="230" y="345" width="210" height="60" rx="8" fill="#7c3aed"/>
+        <text x="335" y="370" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Deployment: natter-database</text>
+        <text x="335" y="386" text-anchor="middle" fill="#fff" font-size="10.5">Pod（H2 数据库）</text>
+
+        <line x1="610" y1="235" x2="600" y2="270" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="618" y="253" font-size="10" fill="#1c2333">⑥ GET /preview?url=...</text>
+
+        <rect x="470" y="270" width="260" height="50" rx="25" fill="#0891b2"/>
+        <text x="600" y="291" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Service</text>
+        <text x="600" y="306" text-anchor="middle" fill="#fff" font-size="9.5">natter-link-preview-service (ClusterIP)</text>
+
+        <line x1="600" y1="320" x2="600" y2="345" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="613" y="337" font-size="10.5" fill="#1c2333">⑦</text>
+
+        <rect x="470" y="345" width="260" height="60" rx="8" fill="#0891b2"/>
+        <text x="600" y="370" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">Deployment: link-preview</text>
+        <text x="600" y="386" text-anchor="middle" fill="#fff" font-size="10.5">Pod（container: link-preview）</text>
+
+        <rect x="520" y="460" width="220" height="50" rx="8" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="4 3"/>
+        <text x="630" y="480" text-anchor="middle" fill="#dc2626" font-size="11" font-weight="700">公网网站 / 内网服务</text>
+        <text x="630" y="495" text-anchor="middle" fill="#dc2626" font-size="10">（SSRF 风险点）</text>
+
+        <line x1="600" y1="405" x2="630" y2="460" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="660" y="428" font-size="9.5" fill="#dc2626">⑧ 抓取任意 URL</text>
+        <text x="660" y="440" font-size="9.5" fill="#dc2626">（必须做 SSRF 校验）</text>
+      </svg>
+      <figcaption>图 10-5：Natter 在 Kubernetes 中的整体架构——一个 namespace 内三组 Deployment + Service，外部流量经 Ingress 进入，link-preview 是唯一会主动向集群外发起请求的组件</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#d97706"></span>Ingress Controller</span>
+        <span><span class="dot" style="background:#16a34a"></span>Kubernetes Service</span>
+        <span><span class="dot" style="background:#2563eb"></span>natter-api</span>
+        <span><span class="dot" style="background:#7c3aed"></span>natter-database</span>
+        <span><span class="dot" style="background:#0891b2"></span>link-preview</span>
+        <span><span class="dot" style="background:#dc2626"></span>外部/风险边界</span>
+      </div>
+    </figure>
+
+    <h2 id="s9">本章小结</h2>
+    <table>
+      <thead>
+        <tr><th>知识点</th><th>关键机制</th><th>本章代码位置</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>容器化</td><td>多阶段 Docker 构建 + 极简基础镜像（distroless）+ 非 root 用户</td><td><code class="inline">docker/h2/Dockerfile</code></td></tr>
+        <tr><td>Pod 加固</td><td><code class="inline">runAsNonRoot</code>、<code class="inline">readOnlyRootFilesystem</code>、丢弃全部 Linux capabilities</td><td><code class="inline">kubernetes/*-deployment.yaml</code></td></tr>
+        <tr><td>特权分离</td><td>把风险操作（抓取任意 URL）拆到独立微服务/独立权限环境</td><td><code class="inline">LinkPreviewer.java</code></td></tr>
+        <tr><td>SSRF 防护</td><td>解析 URL 的每个 IP，拉黑内网/私有/环回等地址；关闭自动跳转，逐跳重新校验</td><td><code class="inline">isBlockedAddress()</code> / <code class="inline">fetch()</code></td></tr>
+        <tr><td>DNS rebinding 防护</td><td>校验 Host header；给内部通信启用 TLS；深度防御可加 IP pinning</td><td>Main.java / LinkPreviewer.java 的 <code class="inline">expectedHostNames</code></td></tr>
+        <tr><td>服务间加密</td><td>Service mesh（Linkerd）用 sidecar 代理自动做 mTLS，业务代码无感知</td><td><code class="inline">natter-namespace.yaml</code> 的 <code class="inline">linkerd.io/inject</code></td></tr>
+        <tr><td>网络隔离</td><td>NetworkPolicy 限定谁能连谁，防止横向移动</td><td>书中示例（未包含在仓库中）</td></tr>
+        <tr><td>入站防护</td><td>Ingress 控制器统一做 TLS 终止、限流、日志</td><td><code class="inline">kubernetes/natter-ingress.yaml</code></td></tr>
+      </tbody>
+    </table>
+    <div class="callout tip">
+      <div class="title">✅ 记住这几条</div>
+      <p>
+        1）能用允许列表就别用阻止列表，SSRF 校验尤其如此；2）校验 URL 之后一定要跟着处理重定向，
+        否则校验形同虚设；3）"来自内网"不等于"可信"，零信任是默认姿态；4）容器和 Pod 的权限越少越好，
+        出问题时能兜住的底线才越高。这些原则跟你用什么语言写业务代码没有关系——Django、Hono 或任何
+        其他框架，都得面对同样的攻击面。
+      </p>
+    </div>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch09/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 9 章：基于能力的安全与 Macaroon</span></a>
+      <a class="next" href="../ch11/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 11 章：保护服务间调用的 API →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

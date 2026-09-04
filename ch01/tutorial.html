@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章：什么是 API 安全？ · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+<style>
+  /* 本页专属的极少量微调：DFD 图里的“数据存储”符号（只有上下两条线，没有左右边框） */
+  .dfd-store-line { stroke: #ffffff; stroke-width: 2; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">1.1 类比：考驾照</a>
+      <a href="#s2">1.2 什么是 API？</a>
+      <a href="#s3">1.3 API 安全的语境</a>
+      <a href="#s4">1.4 API 安全的构成要素</a>
+      <a href="#s5">1.5 安全机制总览</a>
+      <a href="#summary">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 1 章</span>
+    <h1>什么是 API 安全？</h1>
+    <p class="subtitle">在动手写一行代码之前，先搞清楚“安全”到底是什么意思，以及一个 API 都会在哪些地方被攻破。</p>
+
+    <p>打开你手机里的任意一个 App——不管是聊天软件、外卖软件还是记步软件——它几乎都在悄悄地和远程服务器
+    上的 API 通信：下载新消息、上传你的数据、代表你执行各种操作。打开浏览器的开发者工具随便逛一个网页，
+    你也会看到后台密密麻麻地发出几十个 API 请求，服务端可能又由几十个微服务通过内部 API 相互调用才拼出
+    这个页面。就连你家里的智能音箱、冰箱、电表，现在也在通过 API 和云端对话。API 无处不在，这既让软件变
+    得更强大，也让攻击面变得更大——你越依赖 API 完成关键任务，一旦它被攻破，你受到的伤害就越大。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 GDPR</div>
+      <p><strong>GDPR</strong>（《通用数据保护条例》）是欧盟 2018 年生效的一部数据保护法律，要求企业必须
+      用技术和管理手段妥善保护用户的个人数据，数据泄露必须在 72 小时内报告，违规最高可被罚款 2000 万欧元
+      或全球年营业额的 4%。本书后面会讲到的很多安全机制，正是满足这类合规要求的技术基础。</p>
+    </div>
+
+    <p>这一章不写代码，目标只有一个：在你动手加固 Natter 这个示例 API 之前，先在脑子里搭好一张“安全是什么、
+    安全机制都长什么样”的地图。后面每一章都会往这张地图里添砖加瓦。</p>
+
+    <h2 id="s1"><span class="num">1.1</span>类比：考驾照</h2>
+    <p>先讲一个和 API 完全无关的小故事，帮你建立直觉。</p>
+    <p>下班路上，你在公园里遇到老朋友 Alice，她正牵着自己的宠物羊驼散步。你们打了个招呼，聊了几句就各自
+    离开——你完全不需要看她的身份证就知道她是 Alice，因为你们有长期的交往历史，彼此“认识”。</p>
+    <p>接着你赶到驾考中心。考官走出来，第一件事是让你出示驾照，仔细核对照片和你本人是否一致。考官从没见过
+    你，而“冒充别人来替考”在这个场景下是完全合理的担忧，所以他需要一个正式的、难以伪造的凭证来确认你就是
+    你自称的那个人。</p>
+
+    <div class="callout note">
+      <div class="title">💡 身份识别（identify）≠ 身份认证（authenticate）</div>
+      <p>认出 Alice，靠的是“长期熟悉”这种非正式的信任关系；核实驾照，靠的是一个由权威机构签发、难以伪造的
+      凭证，这才是正式的<strong>身份认证</strong>。同一个 API 里，不同的操作也可以要求不同强度的身份确认：
+      查看公开信息也许不需要登录，转账操作则需要严格得多的认证。</p>
+    </div>
+
+    <p>没考过驾照的你只好坐火车回家。你想蒙混进头等车厢蹭个座，结果被列车员拦住，要求出示车票——普通座车票
+    换不来头等舱的座位。回到家，Alice 邀请你去新开的夜店，你满怀期待地走到门口，看门人却把你拦下：“今晚不
+    行。”而这时一位名人走过来，直接被请了进去。</p>
+
+    <div class="callout note">
+      <div class="title">💡 两种“谁能干什么”的思路</div>
+      <p>名人能直接进场，靠的是<strong>身份</strong>（先确认你是谁，再查你有没有权限）——这叫
+      <strong>基于身份的访问控制</strong>。车票能进对应的车厢，靠的是车票本身携带的权限（不管拿票的人是谁，
+      有票就能进）——这叫<strong>基于能力凭证（capability）的访问控制</strong>。两种思路各有取舍，第 8、9
+      章会详细展开。</p>
+    </div>
+
+    <p>你决定出去度假散心，临走前把家里温室大棚的钥匙留给邻居 Bob，让他帮忙照看你收藏的食虫植物。结果你
+    不知道的是，Bob 拿着这把钥匙在你家后院办了一场热闹的派对——好在酒水提前喝光了，没人闯进你锁着的房子
+    和威士忌收藏室。度假回来，你调出家里的监控录像，认出了 Bob，找他对质，他也无法抵赖，只能买了一盆新
+    植物赔罪。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是审计日志（audit log）</div>
+      <p>监控录像就是现实版的<strong>审计日志</strong>：记录“谁在什么时候做了什么”，让你在出问题之后能够
+      查清责任、拿出证据，并且让当事人无法轻易抵赖（这个属性叫<strong>不可否认性</strong>）。钥匙只能开
+      大棚和后院，开不了正屋，这体现的是“最小权限”——只给别人完成任务所必需的那一小部分权限。</p>
+    </div>
+
+    <p>这个小故事里已经埋下了本章要讲的几乎所有概念：识别用户、验证身份、决定谁能做什么、记录发生了什么。
+    接下来我们把这些概念套回到 API 的世界里。</p>
+
+    <h2 id="s2"><span class="num">1.2</span>什么是 API？</h2>
+    <p>早年间，“API”通常指一个软件库暴露出来、可以被静态或动态链接进另一个程序的一组函数（比如做 3D
+    图形的 OpenGL，或者某个网络库）。这类 API 现在依然存在，但越来越多的 API 是通过互联网以 RESTful
+    Web 服务的形式对外提供的——本书也是围绕这一类 API 展开的。</p>
+    <p>抽象地说，<strong>API 是软件系统内部或系统之间的一道边界</strong>：它定义了一组“别人可以调用的操作”。
+    比如一个相册服务可以提供一个 API，允许调用方列出相册、查看照片、添加评论；一个在线图片网站和一个文档
+    编辑器都可以复用同一个 API，把图片嵌入到各自的产品里。如图 1-1 所示，用户通过各种客户端（网页、手机
+    App、IoT 设备）向 API 发起请求，API 处理业务逻辑，可能还要调用其他“后端 API”才能完成任务，最后把结果
+    返回给客户端。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 280" role="img" aria-label="用户通过客户端向 API 发起请求，API 再调用后端服务的关系图">
+        <defs>
+          <marker id="arrow1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+
+        <!-- 用户 -->
+        <rect x="15" y="112" width="95" height="40" rx="8" fill="#2563eb"/>
+        <text x="62" y="136" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">用户</text>
+
+        <!-- 客户端分组 -->
+        <rect x="150" y="15" width="150" height="240" rx="10" fill="none" stroke="#9aa4bf" stroke-dasharray="5 4"/>
+        <text x="225" y="8" text-anchor="middle" font-size="12" fill="#5b6478" font-weight="600">客户端</text>
+        <rect x="170" y="40" width="110" height="38" rx="8" fill="#2563eb"/>
+        <text x="225" y="64" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">Web 应用</text>
+        <rect x="170" y="115" width="110" height="38" rx="8" fill="#2563eb"/>
+        <text x="225" y="139" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">移动 App</text>
+        <rect x="170" y="190" width="110" height="38" rx="8" fill="#2563eb"/>
+        <text x="225" y="214" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">IoT 设备</text>
+
+        <line x1="110" y1="132" x2="150" y2="132" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+
+        <!-- API -->
+        <rect x="330" y="95" width="150" height="80" rx="10" fill="#16a34a"/>
+        <text x="405" y="128" text-anchor="middle" fill="#fff" font-size="13.5" font-weight="700">你的 API</text>
+        <text x="405" y="148" text-anchor="middle" fill="#fff" font-size="11.5">（业务逻辑）</text>
+
+        <line x1="280" y1="59" x2="330" y2="115" stroke="#5b6478" stroke-width="1.3" marker-end="url(#arrow1)"/>
+        <line x1="280" y1="134" x2="330" y2="134" stroke="#5b6478" stroke-width="1.3" marker-end="url(#arrow1)"/>
+        <line x1="280" y1="209" x2="330" y2="155" stroke="#5b6478" stroke-width="1.3" marker-end="url(#arrow1)"/>
+        <text x="305" y="90" text-anchor="middle" font-size="11" fill="#1c2333">请求 / 响应</text>
+
+        <!-- 后端服务分组 -->
+        <rect x="570" y="15" width="140" height="240" rx="10" fill="none" stroke="#9aa4bf" stroke-dasharray="5 4"/>
+        <text x="640" y="8" text-anchor="middle" font-size="12" fill="#5b6478" font-weight="600">后端服务</text>
+        <rect x="585" y="40" width="110" height="38" rx="8" fill="#7c3aed"/>
+        <text x="640" y="64" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">用户数据库</text>
+        <rect x="585" y="115" width="110" height="38" rx="8" fill="#7c3aed"/>
+        <text x="640" y="139" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">认证服务</text>
+        <rect x="585" y="190" width="110" height="38" rx="8" fill="#7c3aed"/>
+        <text x="640" y="214" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">其他微服务</text>
+
+        <line x1="480" y1="115" x2="585" y2="59" stroke="#5b6478" stroke-width="1.3" marker-end="url(#arrow1)"/>
+        <line x1="480" y1="134" x2="585" y2="134" stroke="#5b6478" stroke-width="1.3" marker-end="url(#arrow1)"/>
+        <line x1="480" y1="155" x2="585" y2="209" stroke="#5b6478" stroke-width="1.3" marker-end="url(#arrow1)"/>
+        <text x="530" y="90" text-anchor="middle" font-size="11" fill="#1c2333">内部 API 调用</text>
+      </svg>
+      <figcaption>图 1-1：API 代表用户处理来自客户端的请求，内部可能还要调用其他“后端” API 才能完成工作。</figcaption>
+    </figure>
+
+    <div class="callout note">
+      <div class="title">💡 API 和 UI 有什么不同</div>
+      <p>UI（用户界面）也是一种边界，但它是为“人”设计的，追求好看好用；API 是为“程序”设计的，追求格式
+      规整、易于解析。同一份数据，UI 会包装成漂亮的页面，API 则会给出一份干净的 JSON。</p>
+    </div>
+
+    <h3>常见的 API 风格</h3>
+    <ul>
+      <li><strong>RPC（远程过程调用）</strong>：把远程调用伪装成本地函数调用，通常用紧凑的二进制格式，
+      效率高，但客户端往往需要安装专用的桩代码（stub）。Google 的 gRPC 是现代代表，老式的 SOAP（基于
+      XML）现在仍能在不少企业系统里见到。</li>
+      <li><strong>RMI（远程方法调用）</strong>：RPC 的面向对象变体，让你像调用本地对象方法一样调用远程
+      对象，CORBA、EJB 是典型代表，但因为过于复杂，现在已经比较少见。</li>
+      <li><strong>REST（表述性状态转移）</strong>：由 Roy Fielding 提出，强调统一的消息格式和少量通用
+      操作，用超链接在资源之间导航，以降低客户端和服务端之间的耦合。这也是本书采用的主要风格。</li>
+      <li><strong>查询型 API</strong>：比如 SQL 数据库或 Facebook 的 GraphQL，只暴露少量操作，但配合一套
+      强大的查询语言，让客户端可以精确指定自己想要什么数据。</li>
+    </ul>
+    <p>本书接下来会围绕运行在 HTTP 之上、大体遵循 REST 风格的 API 展开——这也是目前最主流的 API 形态——
+    但书里讲到的安全原则对其他风格的 API 同样适用。</p>
+
+    <h2 id="s3"><span class="num">1.3</span>API 安全的语境</h2>
+    <p>API 安全并不是一门孤立的学科，它站在三个更大的安全领域的交叉点上：</p>
+    <ul>
+      <li><strong>信息安全（InfoSec）</strong>：关注信息从产生、存储、传输、备份到最终销毁的全生命周期保护。</li>
+      <li><strong>网络安全（Network security）</strong>：关注网络中数据流动的保护，以及防止未经授权访问
+      网络本身。</li>
+      <li><strong>应用安全（AppSec）</strong>：确保软件系统在设计和实现上能够抵御攻击与滥用。</li>
+    </ul>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 480 350" role="img" aria-label="API 安全位于信息安全、网络安全、应用安全三者交集的维恩图">
+        <circle cx="240" cy="130" r="105" fill="#7c3aed" fill-opacity="0.55"/>
+        <circle cx="185" cy="225" r="105" fill="#d97706" fill-opacity="0.5"/>
+        <circle cx="295" cy="225" r="105" fill="#16a34a" fill-opacity="0.5"/>
+        <text x="240" y="70" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">信息安全</text>
+        <text x="118" y="258" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">网络安全</text>
+        <text x="362" y="258" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">应用安全</text>
+        <rect x="192" y="188" width="96" height="34" rx="8" fill="#1c2333" opacity="0.85"/>
+        <text x="240" y="210" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">API 安全</text>
+      </svg>
+      <figcaption>图 1-2：API 安全位于信息安全、网络安全与应用安全三者的交集处，各取其精华。</figcaption>
+    </figure>
+
+    <p>从信息安全，你会学到如何定义安全目标、识别威胁、用访问控制保护 API、用密码学保护信息；从网络安全，
+    你会学到防火墙、负载均衡、反向代理这些基础设施的角色，以及如何用 HTTPS 保护传输中的数据；从应用安全，
+    你会学到安全编码技巧、常见的软件安全漏洞，以及如何妥善管理系统和用户凭证。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 HTTPS</div>
+      <p><strong>HTTPS</strong> 就是跑在安全连接（TLS，也叫 SSL）之上的 HTTP。普通 HTTP 的请求和响应对
+      任何能监听网络的人都是明文可见的，HTTPS 则会把内容加密隐藏起来。第 3 章会讲如何为 API 开启 HTTPS。</p>
+    </div>
+
+    <h3 id="s3a">一次典型的 API 部署</h3>
+    <p>你几乎不会把 API 服务器直接暴露在公网上。一个请求在真正到达你写的业务代码之前，通常要先穿过好几层
+    基础设施：</p>
+    <ul>
+      <li><strong>防火墙</strong>在网络层做粗粒度过滤，比如只放行 80、443 端口的流量，其余一律拦截。</li>
+      <li><strong>负载均衡器</strong>把流量分摊到多台服务器上，避免有的机器忙死、有的闲着。</li>
+      <li><strong>反向代理 / 网关</strong>替 API 服务器分担一些昂贵的工作，比如终结 TLS 连接（SSL
+      termination）、校验请求携带的身份凭证、做限流。其中专门用来把多个后端 API 统一包装成一个对外
+      API 的反向代理，叫 <strong>API 网关</strong>。</li>
+    </ul>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 470" role="img" aria-label="一次典型 API 部署的架构图：客户端经防火墙、负载均衡、反向代理到达 API 服务器再访问数据库">
+        <defs>
+          <marker id="arrow2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+
+        <rect x="290" y="15" width="180" height="46" rx="8" fill="#2563eb"/>
+        <text x="380" y="34" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">客户端请求</text>
+        <text x="380" y="50" text-anchor="middle" fill="#fff" font-size="10.5">浏览器 / 移动 / IoT</text>
+
+        <line x1="380" y1="61" x2="380" y2="95" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <text x="440" y="82" text-anchor="middle" font-size="11" fill="#5b6478" font-style="italic">经互联网传输</text>
+
+        <rect x="60" y="95" width="640" height="42" rx="8" fill="#d97706"/>
+        <text x="380" y="121" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">防火墙 — 只放行 80 / 443 端口的流量</text>
+
+        <line x1="380" y1="137" x2="380" y2="167" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+        <rect x="290" y="167" width="180" height="44" rx="8" fill="#d97706"/>
+        <text x="380" y="194" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">负载均衡器</text>
+
+        <line x1="340" y1="211" x2="210" y2="252" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <line x1="420" y1="211" x2="550" y2="252" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+        <rect x="110" y="252" width="200" height="44" rx="8" fill="#d97706"/>
+        <text x="210" y="279" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">反向代理 / 网关 A</text>
+        <rect x="450" y="252" width="200" height="44" rx="8" fill="#d97706"/>
+        <text x="550" y="279" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">反向代理 / 网关 B</text>
+
+        <line x1="210" y1="296" x2="210" y2="332" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <line x1="550" y1="296" x2="550" y2="332" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+        <rect x="110" y="332" width="200" height="44" rx="8" fill="#16a34a"/>
+        <text x="210" y="359" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">API 服务器 1</text>
+        <rect x="450" y="332" width="200" height="44" rx="8" fill="#16a34a"/>
+        <text x="550" y="359" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">API 服务器 2</text>
+
+        <line x1="240" y1="376" x2="335" y2="412" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+        <line x1="520" y1="376" x2="425" y2="412" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+        <rect x="280" y="412" width="200" height="44" rx="8" fill="#7c3aed"/>
+        <text x="380" y="439" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">数据库</text>
+      </svg>
+      <figcaption>图 1-3：请求在到达真正的业务逻辑之前，通常会先经过防火墙、负载均衡器和反向代理／网关的层层处理。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>客户端</span>
+        <span><span class="dot" style="background:#d97706"></span>网络基础设施（防火墙 / 负载均衡 / 反向代理）</span>
+        <span><span class="dot" style="background:#16a34a"></span>API 服务器</span>
+        <span><span class="dot" style="background:#7c3aed"></span>数据库</span>
+      </div>
+    </figure>
+
+    <p>此外还有几种更专门化的组件：<strong>Web 应用防火墙（WAF）</strong>在更高的层面上检查 HTTP 流量，
+    能识别并拦截常见的 Web 攻击；<strong>入侵检测 / 防御系统（IDS/IPS）</strong>监控内部网络里的可疑
+    活动模式，发现异常就报警甚至主动拦截。这些组件之间常有职责重叠，很多负载均衡器也能做反向代理的活，
+    很多反向代理也能兼任 API 网关。</p>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 网关不是万能的</div>
+      <p>把认证、限流这些工作交给网关处理确实很常见，也很方便，但网关配置不当同样会引入新的风险，而且
+      再强大的网关也救不了写得千疮百孔的业务代码。理解这些安全机制的原理，才能判断一个网关产品是否真的
+      适合你，以及它的边界在哪里——这正是本书要从零手写这些机制、而不是直接甩给你一个网关配置文件的原因。</p>
+    </div>
+
+    <h2 id="s4"><span class="num">1.4</span>API 安全的构成要素</h2>
+    <p>既然 API 本来就只暴露你允许的那些操作，为什么还需要专门谈“安全”？原因主要有三点：第一，同一个 API
+    往往要服务权限完全不同的用户，比如普通用户和管理员，如果没有访问控制，任何人都能做任何事；第二，单看
+    每个操作都没问题，组合起来却可能出问题——比如一个银行 API 分别提供“取款”和“存款”接口，各自都会检查
+    额度，但“存款”接口没法判断这笔钱是不是真的从一个合法账户转出的，更安全的做法是提供一个原子的“转账”
+    接口；第三，实现细节本身可能藏着漏洞，比如没有限制输入大小，攻击者发一个超大的请求体就能把服务器内存
+    吃满，造成拒绝服务。</p>
+
+    <div class="callout danger">
+      <div class="title">☠️ 最小化的拒绝服务（DoS）例子</div>
+      <p>假设 API 的“上传头像”接口对请求体大小没有任何限制。攻击者只需要写个脚本，反复发送几百 MB 的
+      POST 请求体，服务器为了解析这些请求会不断分配内存，最终耗尽资源、无法响应正常用户——这就是最简单
+      的一种<strong>拒绝服务（Denial of Service, DoS）攻击</strong>：让合法用户没法正常使用服务。</p>
+    </div>
+
+    <p>安全没有唯一标准答案，也和具体场景强相关：对医疗系统来说，让人查到“某人是不是本系统用户”是严重的
+    隐私泄露；但对社交网络来说，这恰恰是核心功能。所以设计一个安全的 API，通常要考虑以下几件事：</p>
+    <ul>
+      <li>需要保护的<strong>资产（assets）</strong>有哪些；</li>
+      <li>对这些资产而言，重要的<strong>安全目标（security goals）</strong>是什么；</li>
+      <li>有哪些<strong>安全机制（mechanisms）</strong>可以用来实现这些目标；</li>
+      <li>API 运行的<strong>环境</strong>是什么样的，环境里存在哪些<strong>威胁</strong>。</li>
+    </ul>
+
+    <h3>资产</h3>
+    <p>对大多数 API 来说，资产首先是信息：用户名、地址、支付卡信息、数据库里的各种数据，尤其是性取向、
+    政治倾向这类敏感个人信息。其次是物理资产，比如服务器硬件本身——虽然数据中心的门禁和监控让物理入侵的
+    风险很低，但攻击者完全可能通过操作系统或软件的漏洞远程拿到硬件的控制权。简单说：只要有人会因为它被
+    破坏而受到真实或者“感觉上”的损害（无论是直接的经济损失，还是抽象的声誉损失），它就该被当作资产来保护。</p>
+
+    <h3>安全目标</h3>
+    <p>最经典的三个安全目标合称 <strong>CIA 三元组</strong>：</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 520 340" role="img" aria-label="CIA 三元组：机密性、完整性、可用性共同构成安全目标">
+        <line x1="115" y1="80" x2="252" y2="150" stroke="#9aa4bf" stroke-width="1.5"/>
+        <line x1="405" y1="80" x2="270" y2="150" stroke="#9aa4bf" stroke-width="1.5"/>
+        <line x1="260" y1="250" x2="260" y2="210" stroke="#9aa4bf" stroke-width="1.5"/>
+
+        <rect x="40" y="30" width="150" height="60" rx="10" fill="#7c3aed"/>
+        <text x="115" y="55" text-anchor="middle" fill="#fff" font-size="13.5" font-weight="700">机密性</text>
+        <text x="115" y="73" text-anchor="middle" fill="#fff" font-size="10.5">只有授权者能读取信息</text>
+
+        <rect x="330" y="30" width="150" height="60" rx="10" fill="#16a34a"/>
+        <text x="405" y="55" text-anchor="middle" fill="#fff" font-size="13.5" font-weight="700">完整性</text>
+        <text x="405" y="73" text-anchor="middle" fill="#fff" font-size="10.5">防止未经授权的篡改</text>
+
+        <rect x="185" y="250" width="150" height="60" rx="10" fill="#2563eb"/>
+        <text x="260" y="275" text-anchor="middle" fill="#fff" font-size="13.5" font-weight="700">可用性</text>
+        <text x="260" y="293" text-anchor="middle" fill="#fff" font-size="10.5">合法用户随时能访问</text>
+
+        <circle cx="260" cy="170" r="42" fill="#1c2333"/>
+        <text x="260" y="166" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">CIA</text>
+        <text x="260" y="182" text-anchor="middle" fill="#fff" font-size="10">三元组</text>
+      </svg>
+      <figcaption>图 1-4：CIA 三元组——机密性、完整性、可用性——是几乎所有系统都要考虑的基础安全目标。</figcaption>
+    </figure>
+
+    <p>除了 CIA，视场景不同，<strong>可问责性</strong>（追溯谁做了什么）和<strong>不可否认性</strong>
+    （当事人无法抵赖）也常常同样重要。安全目标可以被看作一种非功能性需求（NFR），和性能、可靠性目标放在
+    一起考虑，但它有个天生的难点：很难证明一个目标“从未被违反过”，因为这是在证明一个否命题。</p>
+    <p>一种让安全目标变得可测试的办法，是把抽象目标细化成具体约束。比如一个即时通讯 API，功能需求是
+    “用户能读取自己的消息”；为了保住机密性，你可以加上约束：“用户只能读取自己的消息”“用户必须先登录才能
+    读消息”。有了这样的约束，你就能写出具体的测试用例：创建两个用户，检查用户 A 读不到用户 B 的消息；检查
+    未登录用户读不到任何消息。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 560 420" role="img" aria-label="定义安全目标的四步循环：识别资产、定义安全目标、细化为安全约束、开发与测试">
+        <defs>
+          <marker id="arrow3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="280" y="205" text-anchor="middle" font-size="12" fill="#5b6478" font-style="italic">反复迭代</text>
+
+        <line x1="230" y1="48" x2="330" y2="48" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <circle cx="280" cy="48" r="11" fill="#2563eb"/>
+        <text x="280" y="52" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">①</text>
+
+        <line x1="425" y1="76" x2="425" y2="330" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <circle cx="425" cy="203" r="11" fill="#2563eb"/>
+        <text x="425" y="207" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">②</text>
+
+        <line x1="330" y1="358" x2="230" y2="358" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <circle cx="280" cy="358" r="11" fill="#2563eb"/>
+        <text x="280" y="362" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">③</text>
+
+        <line x1="135" y1="330" x2="135" y2="76" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow3)"/>
+        <circle cx="135" cy="203" r="11" fill="#2563eb"/>
+        <text x="135" y="207" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">④</text>
+
+        <rect x="40" y="20" width="190" height="56" rx="10" fill="#2563eb"/>
+        <text x="135" y="53" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">① 识别资产</text>
+
+        <rect x="330" y="20" width="190" height="56" rx="10" fill="#2563eb"/>
+        <text x="425" y="53" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">② 定义安全目标</text>
+
+        <rect x="330" y="330" width="190" height="56" rx="10" fill="#2563eb"/>
+        <text x="425" y="363" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">③ 细化为安全约束</text>
+
+        <rect x="40" y="330" width="190" height="56" rx="10" fill="#2563eb"/>
+        <text x="135" y="363" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">④ 开发与测试</text>
+      </svg>
+      <figcaption>图 1-5：定义 API 安全是一个不断迭代的过程——开发和测试的过程中往往会发现新的资产（比如登录后新
+      产生的会话 Cookie），从而带来新一轮的循环。</figcaption>
+    </figure>
+
+    <div class="callout tip">
+      <div class="title">✅ 安全不是一次性的事</div>
+      <p>就像你不会只测一次性能就一劳永逸，安全目标和假设也需要被定期回顾。比如实现登录功能之后，你会给
+      每个用户签发一个临时的会话 Cookie——这个 Cookie 本身就是一项新资产，需要被保护起来（第 4 章会讲）。</p>
+    </div>
+
+    <h3>环境与威胁模型</h3>
+    <p>安全目标离不开具体环境。一个只在自行车俱乐部内部使用、记录比赛成绩的小 API，大概率不需要防范
+    国家级情报机构，但确实需要防止骑手偷偷篡改自己或别人的成绩。<strong>威胁</strong>就是任何可能让你的
+    安全目标落空的事件；你所认定的、和自己 API 相关的那一整套威胁，叫<strong>威胁模型</strong>，识别它们
+    的过程叫<strong>威胁建模</strong>。</p>
+
+    <div class="callout note">
+      <div class="title">💡 威胁建模的五个步骤</div>
+      <p>① 画出系统的主要组件；② 标出各部分之间的<strong>信任边界</strong>（同一个信任边界内的东西由同一
+      个所有者控制，比如同一个数据中心，或者同一个操作系统账户下运行的进程）；③ 画箭头表示数据在各组件间
+      如何流动；④ 逐一检查每个组件和每条数据流，尤其要重点关注<strong>跨越信任边界</strong>的数据流，看看
+      有没有可能破坏安全目标的地方；⑤ 把找到的威胁记录下来，持续跟踪和修复。</p>
+    </div>
+
+    <p>下面是一个虚构的“披萨点餐 API”的数据流图（DFD）示例。Web 浏览器和手机 App 各自处于自己的信任边界
+    内（外部实体用直角方框表示），点餐 API 运行在数据中心内某个操作系统账户下，数据库进程（DBMS）和它的
+    数据文件又分别运行在另一个账户下——同一个数据中心里也可以嵌套出好几层信任边界。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 420" role="img" aria-label="披萨点餐 API 的数据流图，展示信任边界与数据流">
+        <defs>
+          <marker id="arrow4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+
+        <rect x="20" y="55" width="140" height="50" fill="#2563eb"/>
+        <text x="90" y="85" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">Web 浏览器</text>
+
+        <rect x="20" y="290" width="140" height="50" fill="#2563eb"/>
+        <text x="90" y="320" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">手机 App</text>
+
+        <rect x="280" y="20" width="460" height="380" rx="4" fill="none" stroke="#9aa4bf" stroke-dasharray="6 4"/>
+        <text x="300" y="40" font-size="11.5" fill="#5b6478" font-weight="600">数据中心集群（信任边界）</text>
+
+        <rect x="300" y="55" width="200" height="115" rx="4" fill="none" stroke="#9aa4bf" stroke-dasharray="6 4"/>
+        <text x="312" y="72" font-size="10.5" fill="#5b6478">API 进程账户</text>
+        <rect x="320" y="90" width="160" height="50" rx="8" fill="#16a34a"/>
+        <text x="400" y="120" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">点餐 API</text>
+
+        <rect x="300" y="195" width="440" height="185" rx="4" fill="none" stroke="#9aa4bf" stroke-dasharray="6 4"/>
+        <text x="312" y="212" font-size="10.5" fill="#5b6478">数据库账户</text>
+        <rect x="320" y="228" width="160" height="50" rx="8" fill="#7c3aed"/>
+        <text x="400" y="258" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">DBMS 进程</text>
+
+        <line x1="330" y1="320" x2="470" y2="320" class="dfd-store-line" stroke="#7c3aed"/>
+        <line x1="330" y1="352" x2="470" y2="352" class="dfd-store-line" stroke="#7c3aed"/>
+        <text x="400" y="341" text-anchor="middle" fill="#1c2333" font-size="12.5" font-weight="700">数据文件</text>
+
+        <line x1="160" y1="70" x2="320" y2="105" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow4)"/>
+        <text x="230" y="65" text-anchor="middle" font-size="10.5" fill="#1c2333">① 下单请求（跨信任边界）</text>
+
+        <line x1="160" y1="310" x2="320" y2="130" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow4)"/>
+        <text x="200" y="230" text-anchor="middle" font-size="10.5" fill="#1c2333">② 下单请求</text>
+
+        <line x1="400" y1="140" x2="400" y2="228" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow4)"/>
+        <text x="470" y="185" text-anchor="middle" font-size="10.5" fill="#1c2333">③ 写入订单</text>
+
+        <line x1="400" y1="278" x2="400" y2="320" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow4)"/>
+        <text x="470" y="300" text-anchor="middle" font-size="10.5" fill="#1c2333">④ 读写数据文件</text>
+      </svg>
+      <figcaption>图 1-6：数据流图（DFD）示例——虚线框是信任边界，直角方框是外部实体，圆角方框是内部进程，
+      两条横线夹住的是数据存储。信任边界之间的数据流（① ②）最值得重点检查。</figcaption>
+    </figure>
+
+    <p>要系统性地找出威胁，一个很流行的方法是 <strong>STRIDE</strong>：</p>
+    <table>
+      <thead>
+        <tr><th>缩写</th><th>威胁类别</th><th>含义</th><th>典型对应机制</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>S</td><td>Spoofing 仿冒</td><td>冒充别人的身份</td><td>身份认证</td></tr>
+        <tr><td>T</td><td>Tampering 篡改</td><td>修改不该由你修改的数据</td><td>完整性校验 / 访问控制</td></tr>
+        <tr><td>R</td><td>Repudiation 抵赖</td><td>否认自己做过的事</td><td>审计日志</td></tr>
+        <tr><td>I</td><td>Information disclosure 信息泄露</td><td>泄露本应保密的信息</td><td>加密 / 访问控制</td></tr>
+        <tr><td>D</td><td>Denial of service 拒绝服务</td><td>让合法用户无法访问</td><td>限流</td></tr>
+        <tr><td>E</td><td>Elevation of privilege 提权</td><td>获取本不该拥有的权限</td><td>访问控制</td></tr>
+      </tbody>
+    </table>
+    <p>STRIDE 里的每一类威胁，几乎都能对应到本节最后要讲的某个安全机制上——这不是巧合，后面每一章其实
+    都是在教你如何针对某一类（或几类）STRIDE 威胁，实现对应的防御机制。</p>
+
+    <h2 id="s5"><span class="num">1.5</span>安全机制总览</h2>
+    <p>威胁可以通过应用安全机制来对抗。几乎每一个设计良好的 API，都会用到下面这五类机制：</p>
+    <ul>
+      <li><strong>加密（Encryption）</strong>：防止数据在传输中或落盘后被未授权者读取或篡改。</li>
+      <li><strong>身份认证（Authentication）</strong>：确认用户和客户端真的是他们自称的那个身份。</li>
+      <li><strong>访问控制（Access control / Authorization）</strong>：确保每一个请求都经过恰当的授权。</li>
+      <li><strong>审计日志（Audit logging）</strong>：记录所有操作，支撑事后追责和实时监控。</li>
+      <li><strong>限流（Rate-limiting）</strong>：防止某个用户（或一群用户）耗尽资源、拖垮服务可用性。</li>
+    </ul>
+    <p>这五个机制通常会按顺序，像一串过滤器一样套在你的业务逻辑外面——一个请求要依次穿过它们，只有全部
+    通过才能真正进入你写的处理函数：</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 940 300" role="img" aria-label="请求处理管道：限流、加密、身份认证、访问控制、审计日志层层把关，最后才到达业务逻辑">
+        <defs>
+          <marker id="arrow5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+          <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#dc2626"/>
+          </marker>
+        </defs>
+
+        <rect x="10" y="140" width="110" height="50" rx="8" fill="#2563eb"/>
+        <text x="65" y="169" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">客户端</text>
+
+        <rect x="150" y="140" width="110" height="50" rx="8" fill="#d97706"/>
+        <text x="205" y="163" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">限流</text>
+        <text x="205" y="178" text-anchor="middle" fill="#fff" font-size="9.5">rate-limit</text>
+
+        <rect x="290" y="140" width="120" height="50" rx="8" fill="#0891b2"/>
+        <text x="350" y="163" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">HTTPS 加密</text>
+        <text x="350" y="178" text-anchor="middle" fill="#fff" font-size="9.5">encryption</text>
+
+        <rect x="440" y="140" width="120" height="50" rx="8" fill="#2563eb"/>
+        <text x="500" y="163" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">身份认证</text>
+        <text x="500" y="178" text-anchor="middle" fill="#fff" font-size="9.5">authentication</text>
+
+        <rect x="590" y="140" width="120" height="50" rx="8" fill="#16a34a"/>
+        <text x="650" y="163" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">访问控制</text>
+        <text x="650" y="178" text-anchor="middle" fill="#fff" font-size="9.5">access control</text>
+
+        <rect x="740" y="140" width="110" height="50" rx="8" fill="#7c3aed"/>
+        <text x="795" y="163" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">审计日志</text>
+        <text x="795" y="178" text-anchor="middle" fill="#fff" font-size="9.5">audit log</text>
+
+        <line x1="120" y1="165" x2="150" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <line x1="260" y1="165" x2="290" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <line x1="410" y1="165" x2="440" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <line x1="560" y1="165" x2="590" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <line x1="710" y1="165" x2="740" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <line x1="850" y1="165" x2="880" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+
+        <rect x="880" y="140" width="50" height="50" rx="8" fill="#16a34a" fill-opacity="0.35" stroke="#16a34a"/>
+        <text x="905" y="160" text-anchor="middle" fill="#1c2333" font-size="9.5" font-weight="700">业务</text>
+        <text x="905" y="174" text-anchor="middle" fill="#1c2333" font-size="9.5" font-weight="700">逻辑</text>
+
+        <line x1="205" y1="190" x2="205" y2="230" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+        <line x1="500" y1="190" x2="500" y2="230" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+        <line x1="650" y1="190" x2="650" y2="230" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+        <text x="205" y="248" text-anchor="middle" fill="#dc2626" font-size="11" font-weight="600">✕ 拒绝</text>
+        <text x="500" y="248" text-anchor="middle" fill="#dc2626" font-size="11" font-weight="600">✕ 拒绝</text>
+        <text x="650" y="248" text-anchor="middle" fill="#dc2626" font-size="11" font-weight="600">✕ 拒绝</text>
+      </svg>
+      <figcaption>图 1-7：请求依次经过限流、加密传输、身份认证、访问控制、审计日志，任何一关不通过都会被直接拒绝，
+      只有全部通过才能进入真正的业务逻辑。</figcaption>
+    </figure>
+
+    <h3>1.5.1 加密</h3>
+    <p>加密保护的是“API 之外”的数据：一是<strong>传输中的数据</strong>（用 TLS/HTTPS，第 3 章讲），
+    二是<strong>静态数据</strong>，也就是落在磁盘上的数据（数据库加密相关内容会在第 5 章略有涉及）。
+    现代加密算法不仅能防止数据被偷看，还能防止数据被悄悄篡改。</p>
+
+    <h3>1.5.2 身份识别与认证</h3>
+    <p>认证要验证的与其说是“用户本身”，不如说是关于用户身份的一个个<strong>声明</strong>（比如用户名），
+    验证声明是否为真，靠的是用户出示的<strong>凭证</strong>。常见的认证因素分三类：</p>
+    <table>
+      <thead><tr><th>因素类型</th><th>例子</th><th>弱点</th></tr></thead>
+      <tbody>
+        <tr><td>你知道什么（Something you know）</td><td>密码</td><td>容易设得太弱，或被写在便签上</td></tr>
+        <tr><td>你有什么（Something you have）</td><td>手机、硬件密钥</td><td>可能丢失或被盗</td></tr>
+        <tr><td>你是什么（Something you are）</td><td>指纹、虹膜等生物特征</td><td>识别错误率往往偏高</td></tr>
+      </tbody>
+    </table>
+    <div class="callout tip">
+      <div class="title">✅ 什么是双因素 / 多因素认证（2FA / MFA）</div>
+      <p>任何单一因素都可能被攻破，所以更安全的系统会要求<strong>两种及以上不同类型</strong>的因素同时
+      通过验证——比如密码（你知道什么）+ 手机 App 生成的动态验证码（你有什么）。注意：用两个密码登录仍然
+      只算“单因素”，因为两个都属于“你知道什么”。</p>
+    </div>
+
+    <h3>1.5.3 访问控制与授权</h3>
+    <p>本书里“访问控制”和“授权”基本混用。它主要有两种思路：<strong>基于身份的访问控制</strong>先确认
+    用户是谁，再根据身份和规则判断能不能访问某个资源；<strong>基于能力凭证（capability）的访问控制</strong>
+    则把权限直接编码进一个不可伪造的令牌里——拿到令牌就等于拿到了对应的权限，不需要额外核实持有人的身份，
+    有点像一把物理钥匙：谁拿着钥匙谁就能开门。第 8、9 章会分别详细讲这两种模式。</p>
+    <div class="callout note">
+      <div class="title">💡 一个反直觉的例子：维基百科几乎没有访问控制</div>
+      <p>维基百科允许任何人查看、编辑甚至创建页面，几乎不设访问控制，靠的是强大的版本回滚能力和公开的
+      编辑历史（也就是审计日志）来兜底——恶意修改可以被轻易撤销，社区规范和“谁改了什么都看得见”这件事本身
+      就形成了约束。当然，遇到持续的破坏或编辑战，维基百科也会对个别页面临时加上访问限制。</p>
+    </div>
+
+    <h3>1.5.4 审计日志</h3>
+    <p>一份好的审计日志应该能回答：谁做的、用什么客户端做的、什么时候做的、做了什么类型的操作（读还是改）、
+    操作了哪个资源、成功了没有（失败原因是什么）、同一时间段还做了哪些别的操作。审计日志既要防篡改，本身
+    往往又包含个人敏感信息（PII），所以它自己也是需要被机密性保护的资产——这正好呼应了图 1-5 里“开发和
+    测试会不断发现新资产”的说法。</p>
+
+    <h3>1.5.5 限流</h3>
+    <p>限流的目标是保护<strong>可用性</strong>，对抗拒绝服务攻击。攻击者可以靠发送海量请求、超大请求，
+    或者故意发得很慢来长时间占用连接，耗尽 CPU、内存、连接数等有限资源。防御的核心思路是识别出“某个客户端
+    （或一群客户端）用掉了超过自己份额的资源”，然后加以限制。</p>
+    <div class="callout note">
+      <div class="title">💡 限流（rate-limiting）vs 配额（quota）vs 节流（throttling）</div>
+      <p><strong>限流</strong>通常在用户登录之前就生效，按 IP 或整体请求速率限制；<strong>配额</strong>
+      是登录之后针对具体账号的业务规则，比如“每人每天最多发 5 条帖子”；<strong>节流</strong>则是限流触发
+      之后的一种柔性处理方式——不是直接掐断连接，而是排队处理或者提示客户端“慢一点”，如果客户端不听，
+      后续请求才会被拒绝。因为限流本身要足够“便宜”（不能比正常处理请求消耗更多资源），它经常被放在负载
+      均衡器、反向代理或专门的网关里高效实现，而不是塞进每一个 API 里各写一遍。</p>
+    </div>
+
+    <h2 id="summary">本章小结</h2>
+    <table>
+      <thead><tr><th>安全机制</th><th>主要对抗的 STRIDE 威胁</th><th>核心问题</th><th>本书对应章节</th></tr></thead>
+      <tbody>
+        <tr><td>加密</td><td>信息泄露 / 篡改</td><td>数据在传输和存储时会不会被偷看或改掉？</td><td>第 3、5 章</td></tr>
+        <tr><td>身份认证</td><td>仿冒</td><td>你真的是你说的那个人吗？</td><td>第 3、4 章</td></tr>
+        <tr><td>访问控制</td><td>提权 / 篡改</td><td>你有没有权限做这件事？</td><td>第 3、8、9 章</td></tr>
+        <tr><td>审计日志</td><td>抵赖</td><td>出了问题，能查清是谁做的吗？</td><td>第 3 章</td></tr>
+        <tr><td>限流</td><td>拒绝服务</td><td>会不会有人把服务拖垮？</td><td>第 3 章</td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li>API 是软件系统之间的一道边界，为“程序”而不是“人”设计，常见风格有 RPC、REST、GraphQL 等。</li>
+      <li>API 安全站在信息安全、网络安全、应用安全的交叉点上，一次请求通常要穿过防火墙、负载均衡、反向
+      代理/网关才能到达真正的 API 服务器。</li>
+      <li>定义安全 = 识别资产 → 定义安全目标（机密性、完整性、可用性等）→ 细化为可测试的约束 →
+      开发测试中发现新资产，如此循环。</li>
+      <li>威胁模型描述了你所关心的、可能破坏安全目标的具体事件，STRIDE 是一套帮你系统性查找威胁的清单。</li>
+      <li>五大安全机制——加密、身份认证、访问控制、审计日志、限流——像一串过滤器一样保护你的业务逻辑，
+      本书接下来的每一章都会带你从零实现其中的一个或几个。</li>
+    </ul>
+
+    <div class="callout tip">
+      <div class="title">✅ 接下来会怎么学</div>
+      <p>从第 2 章开始，你会跟着书里的 Java + Spark 示例项目 <strong>Natter</strong> 一步步搭建并加固一个
+      真实的社交类 API。为了让你能对照自己更熟悉的技术栈，本教程从第 2 章起会给每一个安全机制配上三栏
+      代码对比：<strong>Java/Spark（原书）</strong>、<strong>Python/Django</strong> 和
+      <strong>TypeScript/Hono.js</strong> 的等价实现——同一个机制，三种写法，帮你把“安全原理”和“具体
+      技术栈里怎么落地”对应起来。</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../index.html"><span class="lbl">返回目录</span><span class="ttl">← 教程首页</span></a>
+      <a class="next" href="../ch02/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 2 章：安全的 API 开发 →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

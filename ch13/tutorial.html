@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 13 章：保护物联网 API · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+<style>
+  .loopbox-label { font-size: 11px; fill: #5b6478; }
+  .review-table td.mech { color: var(--text-dim); font-size: 13.5px; }
+  .review-table td.ch { white-space: nowrap; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">13.1 认证设备</a>
+      <a href="#s2">13.2 端到端认证</a>
+      <a href="#s3">13.3 面向受限环境的 OAuth2</a>
+      <a href="#s4">13.4 离线访问控制</a>
+      <a href="#s5">本章小结</a>
+      <a href="#s6">全书回顾</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 13 章 · 全书最后一章</span>
+    <h1>保护物联网 API</h1>
+    <p class="subtitle">一台没有屏幕、没有键盘、还可能随时断网的智能设备，要怎么证明"我是我"、怎么拿到用户授权、以及在联系不上服务器时还能不能做出正确的安全决定。</p>
+
+    <p>
+      想象一台智能门锁：它没有浏览器，没法弹出登录框；它没有键盘，用户没法在它上面输入密码；它甚至可能大部分时间连不上网——安装在地下车库、隧道、偏远仓库里都很常见。可是它仍然要回答三个和之前十二章一模一样的安全问题：<strong>这个请求是谁发的？它有没有权限？这条消息是不是刚刚发生的，还是攻击者从半小时前的录像里"倒带"重放的？</strong>
+      只不过在物联网（IoT）场景下，回答这三个问题的方式都要做出让步——设备本身要能被唯一识别，网络请求可能要绕开传统的 HTTP/TLS 走一整段不受信任的链路，而且授权服务器不一定随时在线。这正是本章要解决的问题，也是全书的收尾：前面十二章讲的认证、授权、加密的道理没有变，变的是运行环境的假设。
+    </p>
+
+    <div class="callout note">
+      <div class="title">💡 本章的四个问题</div>
+      <p>
+        13.1 讲设备怎么"自证身份"（类似给设备发工牌）；13.2 讲两端之间的消息怎么防止被截获重放（哪怕消息本身是加密签名过的）；13.3 讲一台没有输入设备的物件怎么走 OAuth2 拿到用户授权（类似智能电视扫码登录）；13.4 讲设备联系不上云端时，怎么仍然能就地做出"允许"或"拒绝"的决定。
+      </p>
+    </div>
+
+    <h2 id="s1"><span class="num">13.1</span>认证设备</h2>
+
+    <p>
+      消费级 IoT 设备（比如智能音箱、门锁）通常代表某个用户在行动；工业 IoT 设备（比如仓库里的传感器）则经常完全自主运作，没有人在背后按按钮——它们更像第 11 章讲的"服务对服务"调用，只是调用方换成了一台物理设备。不管哪种场景，第一步都一样：API 服务器要能识别"这是哪台设备"，然后才能谈认证和授权。
+    </p>
+
+    <h3>13.1.1 识别设备</h3>
+    <p>
+      做法和给用户建账号很像：维护一张"设备档案"表，把设备标识和它用来认证自己的凭证关联起来。用户档案里存的通常是密码哈希、姓名、地址；设备档案里存的则是一个<strong>预共享密钥（PSK，Pre-Shared Key）</strong>、厂商型号信息、以及设备部署在哪里。这份档案可以在设备出厂时就写好，也可以在设备第一次接入组织网络时生成，这个过程叫<strong>设备入网（onboarding）</strong>。
+    </p>
+    <div class="callout note">
+      <div class="title">💡 什么是设备入网（onboarding）</div>
+      <p>指的是把一台新设备正式接入某个网络、并在服务端登记它的身份和权限的过程——有点像新员工入职时给他发工牌、开系统账号。</p>
+    </div>
+    <p>
+      下面是 Natter 项目里一个最简的设备档案实现：一个 <code class="inline">Device</code> 类，携带设备 ID、厂商、型号，以及<strong>加密后</strong>的 PSK（用第 6 章学过的 NaCl <code class="inline">SecretBox</code> 加密，避免密钥明文存库）。查找设备时用绑定参数防 SQL 注入，这是第 2 章就强调过的老规矩。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/Device.java（节选）</div>
+        <pre><code>public class Device {
+    final String deviceId;
+    final String manufacturer;
+    final String model;
+    final byte[] encryptedPsk;
+
+    @DalesbredInstantiator
+    public Device(String deviceId, String manufacturer,
+                  String model, byte[] encryptedPsk) {
+        this.deviceId = deviceId;
+        this.manufacturer = manufacturer;
+        this.model = model;
+        this.encryptedPsk = encryptedPsk;
+    }
+
+    public byte[] getPsk(Key decryptionKey) {
+        try (var in = new ByteArrayInputStream(encryptedPsk)) {
+            var box = SecretBox.readFrom(in);
+            return box.decrypt(decryptionKey);
+        } catch (IOException e) {
+            throw new RuntimeException("Unable to decrypt PSK", e);
+        }
+    }
+
+    static Optional&lt;Device&gt; find(Database database, String deviceId) {
+        return database.findOptional(Device.class,
+                "SELECT device_id, manufacturer, model, encrypted_psk " +
+                        "FROM devices WHERE device_id = ?", deviceId);
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">devices/models.py（教学示例）</div>
+        <pre><code>from django.db import models
+from nacl.secret import SecretBox
+
+class Device(models.Model):
+    device_id = models.CharField(max_length=30, primary_key=True)
+    manufacturer = models.CharField(max_length=100)
+    model = models.CharField(max_length=100)
+    encrypted_psk = models.BinaryField(max_length=1024)
+
+    def get_psk(self, decryption_key: bytes) -> bytes:
+        # 用的是同一种 NaCl SecretBox 构造（PyNaCl 是 libsodium 的 Python 绑定）
+        box = SecretBox(decryption_key)
+        nonce = bytes(self.encrypted_psk[:SecretBox.NONCE_SIZE])
+        ciphertext = bytes(self.encrypted_psk[SecretBox.NONCE_SIZE:])
+        return box.decrypt(ciphertext, nonce)
+
+# 按 device_id 查找，ORM 自动使用参数化查询，天然防 SQL 注入
+device = Device.objects.filter(pk=device_id).first()</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/db/schema.ts + src/services/device.ts（教学示例）</div>
+        <pre><code>// src/db/schema.ts
+import { pgTable, varchar, customType } from "drizzle-orm/pg-core";
+
+const bytea = customType&lt;{ data: Buffer }&gt;({ dataType: () =&gt; "bytea" });
+
+export const devices = pgTable("devices", {
+  deviceId: varchar("device_id", { length: 30 }).primaryKey(),
+  manufacturer: varchar("manufacturer", { length: 100 }).notNull(),
+  model: varchar("model", { length: 100 }).notNull(),
+  encryptedPsk: bytea("encrypted_psk").notNull(),
+});
+
+// src/services/device.ts
+import { secretbox } from "tweetnacl";
+import { eq } from "drizzle-orm";
+
+function getPsk(encryptedPsk: Uint8Array, decryptionKey: Uint8Array) {
+  const nonce = encryptedPsk.slice(0, secretbox.nonceLength);
+  const ciphertext = encryptedPsk.slice(secretbox.nonceLength);
+  const psk = secretbox.open(ciphertext, nonce, decryptionKey);
+  if (!psk) throw new Error("Unable to decrypt PSK");
+  return psk;
+}
+
+// 按 deviceId 查找，drizzle 同样使用参数化查询
+const device = await db.query.devices.findFirst({
+  where: eq(devices.deviceId, deviceId),
+});</code></pre>
+      </div>
+    </div>
+
+    <h3>13.1.2 设备证书</h3>
+    <p>
+      另一种做法是不把设备档案存数据库，而是给每台设备发一张"证书"——可以是传统的公钥证书，也可以是像下面这样一个自包含的、由可信签发方签过名的 JSON Web Token（JWT），里面直接携带设备信息和一份加密过的 PSK。设备把这个令牌当作一个不透明的凭据，原样交给它要访问的 API；API 因为信任签发者的签名而信任这个令牌，再把里面的 PSK 解密出来用于和设备通信。
+    </p>
+    <pre class="plain"><code>{
+  "iss": "https://example.com/devices",
+  "iat": 1590139506,
+  "exp": 1905672306,
+  "sub": "ada37d7b-e895-4d55-9571-4df602e60c27",
+  "psk": "jZvara1OnqqBZrz1HtvHBCNjXvCJptEuIAAAAJInAtaLFnYna9K0WxX4_IGPyztb8VUwo0CI_UmqDQgm"
+}</code></pre>
+    <p>
+      比起中心化的设备数据库，这种"证书式"档案在设备数量非常多时更容易扩展（不需要每次都查一个越来越大的表），代价是事后想改信息或换密钥会更麻烦——你得等旧证书过期，或者搭一套撤销机制。第 12 章讲过的"证明（attestation）"技术是一种折中：先用出厂证书证明设备的型号，再协商一个设备专属的会话密钥长期使用。
+    </p>
+
+    <h3>13.1.3 在传输层认证</h3>
+    <p>
+      如果设备和 API 之间是直连的，认证工作可以完全交给传输层协议去做——比如第 12 章讲过的 TLS/DTLS 的 PSK 密码套件，能同时完成客户端和服务端的双向认证；更强的设备也可以像第 11 章的服务间调用那样用客户端证书。以 PSK 为例：握手过程中客户端会在 <code class="inline">ClientKeyExchange</code> 消息里带上一个 "PSK 身份标识"，服务端拿这个标识去查对应的密钥。这一步天然可以和"查设备档案"结合起来——查到 PSK 的同时，也就知道了这是哪台设备。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 320" role="img" aria-label="设备通过 PSK 身份标识完成传输层认证并被 API 识别的时序图">
+        <defs>
+          <marker id="arrow1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="120" height="36" rx="8" fill="#2563eb"/>
+        <text x="80" y="32" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">设备</text>
+        <rect x="290" y="10" width="140" height="36" rx="8" fill="#16a34a"/>
+        <text x="360" y="32" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">API 服务器（DTLS）</text>
+        <rect x="560" y="10" width="120" height="36" rx="8" fill="#7c3aed"/>
+        <text x="620" y="32" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">设备数据库</text>
+
+        <line x1="80" y1="46" x2="80" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="360" y1="46" x2="360" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="620" y1="46" x2="620" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="85" y1="90" x2="355" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="220" y="82" text-anchor="middle" font-size="12" fill="#1c2333">① ClientKeyExchange：设备发送 PSK ID = "test"</text>
+
+        <line x1="365" y1="126" x2="615" y2="126" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="490" y="118" text-anchor="middle" font-size="12" fill="#1c2333">② 按 PSK ID 查询设备档案</text>
+
+        <line x1="615" y1="162" x2="365" y2="162" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="490" y="154" text-anchor="middle" font-size="12" fill="#1c2333">③ 返回 encrypted_psk 等字段</text>
+
+        <path d="M 360,198 h50 v14 h-50" fill="none" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="415" y="192" text-anchor="middle" font-size="12" fill="#1c2333">④ 用主密钥本地解密 PSK</text>
+
+        <line x1="85" y1="234" x2="355" y2="234" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="220" y="226" text-anchor="middle" font-size="12" fill="#1c2333">⑤ 完成 DTLS 握手（双方都证明持有同一 PSK）</text>
+
+        <line x1="85" y1="270" x2="355" y2="270" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="220" y="262" text-anchor="middle" font-size="12" fill="#1c2333">⑥ 后续请求：API 调用 getPeerDeviceIdentity() 取回设备身份</text>
+      </svg>
+      <figcaption>图 13-1：设备在 DTLS 握手中提交 PSK 身份标识，API 服务器据此查询设备档案、解密对应的 PSK 并完成双向认证。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>设备（客户端）</span>
+        <span><span class="dot" style="background:#16a34a"></span>API / DTLS 服务器</span>
+        <span><span class="dot" style="background:#7c3aed"></span>设备数据库（存 encrypted_psk）</span>
+      </div>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 只信任握手完成之后的身份</div>
+      <p>
+        Bouncy Castle 不会主动暴露握手过程中协商到的 PSK 身份，需要自己加一个方法读出 <code class="inline">SecurityParametersConnection</code>（而不是 <code class="inline">SecurityParametersHandshake</code>）里的值——握手完成前的身份还没经过认证，可能是伪造的。
+      </p>
+    </div>
+
+    <p>
+      拿到验证过的 PSK 身份之后，Java 端只需要新增一个 <code class="inline">DeviceIdentityManager</code>，实现 Bouncy Castle 的 <code class="inline">TlsPSKIdentityManager</code> 接口：给定身份标识去查设备、查到就返回解密后的 PSK，查不到返回 <code class="inline">null</code> 中断连接。这一整套 PSK/DTLS 握手发生在传输层，Django 或 Hono 这类应用框架并不直接参与——它们通常运行在反向代理/网关（nginx、Envoy 或专门的 CoAP/DTLS 网关）之后，由网关完成握手，再把验证好的设备身份通过一个内部请求头转发给应用层，这和第 11 章讲 mTLS 时"证书在网关终止、应用读头"的模式是一致的。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/DeviceIdentityManager.java</div>
+        <pre><code>public class DeviceIdentityManager implements TlsPSKIdentityManager {
+    private final Database database;
+    private final Key pskDecryptionKey;
+
+    public DeviceIdentityManager(Database database, Key pskDecryptionKey) {
+        this.database = database;
+        this.pskDecryptionKey = pskDecryptionKey;
+    }
+
+    @Override
+    public byte[] getHint() {
+        return null; // 不需要给客户端任何身份提示
+    }
+
+    @Override
+    public byte[] getPSK(byte[] identity) {
+        var deviceId = new String(identity, UTF_8);
+        return Device.find(database, deviceId)
+                .map(device -&gt; device.getPsk(pskDecryptionKey))
+                .orElse(null); // 找不到设备就中断连接
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">devices/middleware.py（教学示例）</div>
+        <pre><code># PSK/DTLS 或 mTLS 握手真正发生在反向代理（nginx / Envoy）里，
+# Django 本身不终止 TLS。代理验证完设备身份后，
+# 会把设备标识写进一个内部请求头再转发给应用。
+class DeviceIdentityMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        # 例如 nginx 用 ssl_client_s_dn 或自定义 PSK 校验模块设置这个头
+        device_id = request.headers.get("X-Device-Id")
+        request.device = None
+        if device_id:
+            request.device = Device.objects.filter(pk=device_id).first()
+            if request.device is None:
+                return HttpResponseForbidden("unknown device")
+        return self.get_response(request)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/deviceIdentity.ts（教学示例）</div>
+        <pre><code>import { createMiddleware } from "hono/factory";
+import { eq } from "drizzle-orm";
+
+// 同样假设 DTLS/mTLS 已经在网关层（Envoy/nginx）终止，
+// 网关验证完设备的 PSK 或客户端证书后，把设备 ID 写进内部头转发过来。
+export const deviceIdentity = createMiddleware(async (c, next) =&gt; {
+  const deviceId = c.req.header("x-device-id");
+  if (deviceId) {
+    const device = await db.query.devices.findFirst({
+      where: eq(devices.deviceId, deviceId),
+    });
+    if (!device) return c.text("unknown device", 403);
+    c.set("device", device);
+  }
+  await next();
+});</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s2"><span class="num">13.2</span>端到端认证</h2>
+    <p>
+      如果设备到 API 之间要穿过多种协议、多个中间代理（第 12 章讲过的场景），传输层认证就不够用了——中间人可能根本不支持端到端的 TLS。这时候要靠消息本身自带的认证加密（比如第 6 章的 COSE 或 NaCl <code class="inline">CryptoBox</code>）来保证请求没被篡改、确实来自它自称的设备。但这里有个容易被忽略的陷阱：<strong>光有"消息认证"是不够的</strong>。
+    </p>
+    <div class="callout danger">
+      <div class="title">☠️ 重放攻击：消息是真的，但它是"旧"的</div>
+      <p>
+        设想一把联网智能门锁，只接受来自机主手机的、签过名的"开锁"请求。攻击者不需要破解签名，只需要在机主某次正常开锁时，用嗅探设备截获这条已加密、已签名的请求原文，原封不动地保存下来。第二天机主不在家，攻击者把这条截获的请求<strong>原样重放</strong>一遍——因为签名验证完全正确，门锁照样会开。消息本身没有被伪造一个字节，但它已经不是"这一刻"发出的请求了。这就是<strong>重放攻击（replay attack）</strong>：攻击者不需要读懂或篡改消息内容，只需要把一条合法消息在错误的时间重新播放一次。
+      </p>
+    </div>
+    <p>
+      要防住这种攻击，API 需要确认请求不仅"来自谁"，还得是"刚刚发生的"，这两者合起来才叫<strong>实体认证（entity authentication）</strong>：
+    </p>
+    <pre class="plain"><code>实体认证 = 消息认证（这条消息确实是它自称的发送者写的）
+         + 新鲜性 / freshness（这条消息是最近发出的，不是被重放的旧消息）</code></pre>
+    <p>保证"新鲜性"通常有三种办法，安全性依次递增，但代价也依次变高：</p>
+    <ul>
+      <li><strong>时间戳</strong>：请求里带上生成时间，服务端拒绝太旧的请求。最弱——只要在有效期内，攻击者仍能重放；还要求双方时钟基本同步。</li>
+      <li><strong>随机数 / 单调递增计数器（nonce）</strong>：请求带一个只能用一次的值，服务端记住用过的值，拒绝重复。如果能用一个只增不减的计数器，服务端只需要记住"见过的最大值"，实现起来更省空间。</li>
+      <li><strong>挑战-响应（challenge-response）</strong>：服务端先随机生成一个"挑战值"发给客户端，客户端把它写进下一次请求里再发回来，服务端确认这条请求确实是在挑战值下发之后才产生的。最安全，但多了一轮网络往返。</li>
+    </ul>
+
+    <h3>13.2.1 OSCORE：CoAP 世界里的端到端安全</h3>
+    <p>
+      OSCORE（Object Security for Constrained RESTful Environments）是专门给 IoT REST 请求设计的端到端安全协议，构建在 CoAP（受限应用协议）和 COSE 之上。它可以替代 DTLS，也可以和 DTLS 叠加使用——DTLS 保护"链路"，OSCORE 保护"消息本身"，两者结合安全性最好。
+    </p>
+    <p>
+      OSCORE 的核心是双方各自维护一份"安全上下文"：一个 <strong>Common Context</strong>（主密钥、主盐值，派生出公共 IV）、一个 <strong>Sender Context</strong>（发送方 ID、发送密钥、一个只增不减的<strong>序列号</strong>）、一个 <strong>Recipient Context</strong>（接收方 ID、接收密钥、一个用来防重放的<strong>接收窗口</strong>）。发消息时，序列号（在协议里叫 Partial IV）和公共 IV 通过异或组合出这一条消息独一无二的加密 nonce；收消息时，接收方检查这个序列号是不是"新的"——没见过、比记录里的下限大，才接受。
+    </p>
+    <div class="callout note">
+      <div class="title">💡 这一段是协议 / 嵌入式层的内容</div>
+      <p>
+        OSCORE 的密钥派生、nonce 生成、CoAP 报文编码都发生在比 HTTP 应用框架更底层的位置——通常是设备固件或专门的 CoAP 网关里的逻辑，而不是 Django、Hono 这类跑在 HTTP 之上的 Web 框架。所以这里不给三栏 Django/Hono 对比，直接看一段从 Java 摘录、精简过的核心逻辑就够了；如果你要在 Python/Node 里做类似的事，可以了解一下 <code class="inline">aiocoap</code>（Python 的 CoAP 实现）、<code class="inline">cryptography</code> 库自带的 HKDF，以及 Node 生态里的 <code class="inline">node-coap</code>、<code class="inline">cose-js</code>——但它们服务的场景是嵌入式设备，不是普通的 Web 后端。
+      </p>
+    </div>
+    <pre class="plain"><code>// ch13/src/main/java/com/manning/apisecurityinaction/Oscore.java（节选、精简）
+
+// 用 HKDF-Expand 从主 HKDF 密钥派生出 Sender/Recipient Key
+private static Key deriveKey(Key hkdfKey, byte[] id, byte[] idContext,
+                              AlgorithmID coseAlgorithm) throws GeneralSecurityException {
+    int keySizeBytes = coseAlgorithm.getKeySize() / 8;
+    CBORObject context = CBORObject.NewArray();
+    context.Add(id);
+    context.Add(idContext);
+    context.Add(coseAlgorithm.AsCBOR());
+    context.Add(CBORObject.FromObject("Key"));
+    context.Add(keySizeBytes);
+    return HKDF.expand(hkdfKey, context.EncodeToBytes(), keySizeBytes, "AES");
+}
+
+// 每条消息的 nonce = 序列号 + 发送方 ID 编码后，与公共 IV 异或得到
+private static byte[] nonce(int ivLength, long sequenceNumber,
+                             byte[] id, byte[] commonIv) {
+    if (sequenceNumber > (1L &lt;&lt; 40))
+        throw new IllegalArgumentException("Sequence number too large");
+    var buffer = ByteBuffer.allocate(ivLength).order(ByteOrder.BIG_ENDIAN);
+    buffer.put((byte) id.length);
+    buffer.put(new byte[ivLength - 6 - id.length]);
+    buffer.put(id);
+    buffer.put((byte) ((sequenceNumber &gt;&gt;&gt; 32) & 0xFF));
+    buffer.putInt((int) sequenceNumber);
+    return xor(buffer.array(), commonIv); // 与公共 IV 异或
+}</code></pre>
+    <div class="callout warn">
+      <div class="title">⚠️ 密钥和 nonce 是确定性派生的</div>
+      <p>
+        OSCORE 里同一份安全上下文如果被重复使用（比如设备重启后没能保存序列号，又从 0 开始计数），会导致灾难性的 nonce 重用，直接摧毁加密方案的安全性。设备要么可靠地把上下文状态持久化到断电也不丢的存储里，要么每次会话都重新协商一套全新的随机参数。
+      </p>
+    </div>
+    <p>
+      如果接收方是一组云端服务器集群，重放窗口的状态就得在所有实例间同步，否则请求 A 落到服务器 1、请求 A 的重放落到服务器 2，服务器 2 完全不知道 A 已经被处理过。一种取巧的做法是<strong>粘性负载均衡（sticky load balancing）</strong>：让同一台设备的请求始终落到同一台服务器上，但这会牺牲弹性伸缩能力，服务器一重启或被移出集群就会出问题，所以并不总是推荐的方案。
+    </p>
+
+    <h3>13.2.2 在 REST API 中避免重放</h3>
+    <p>
+      并不是所有请求都需要复杂的防重放机制。只读请求（GET）重放了也没事，只要它不修改数据、响应内容也没有泄密风险。HTTP 规范里 GET、HEAD、OPTIONS、PUT、DELETE 都被要求是<strong>幂等（idempotent）</strong>的——重复执行和执行一次效果相同。只有 POST 和 PATCH 通常不是幂等的。
+    </p>
+    <div class="callout warn">
+      <div class="title">⚠️ 幂等不等于"重放安全"</div>
+      <p>
+        幂等性只保证"连续重复执行"没问题，完全没规定"两次执行之间发生了别的事怎么办"。举个例子：你发了一条 PUT 请求更新页面内容，网络超时你不知道有没有成功，于是重试了一次；但就在两次请求之间，同事发了一条 DELETE 把这份含敏感信息的文档删掉了。你的重试请求这时候才姗姗来迟，页面被"复活"，敏感数据也一起被复活了。攻击者完全可以利用这一点，故意重放一条旧的 PUT 请求，把资源恢复成一个更早、对自己更有利的版本。
+      </p>
+    </div>
+    <p>
+      标准 HTTP 机制里有两种办法确认"自从我上次读到这份资源之后，没有人动过它"：服务端返回 <code class="inline">Last-Modified</code>，客户端更新时带上 <code class="inline">If-Unmodified-Since</code>；或者服务端返回一个 <code class="inline">ETag</code>（内容版本标签），客户端更新时带上 <code class="inline">If-Matches</code>，一旦服务端发现当前 ETag 和请求里的不一致，就用 <code class="inline">412 Precondition Failed</code> 拒绝请求。ETag 通常是一个版本号或者内容哈希；如果用哈希，要留意"内容变回旧值时哈希也会变回旧值"，导致旧请求又能重放成功——所以最好在计算 ETag 时混入一个只增不减的版本号或时间戳。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 400" role="img" aria-label="重放攻击与基于 ETag 的防御对比时序图">
+        <defs>
+          <marker id="arrowGray" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+          <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#dc2626"/>
+          </marker>
+          <marker id="arrowOrange" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#d97706"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="130" height="36" rx="8" fill="#2563eb"/>
+        <text x="85" y="32" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">设备 / 合法客户端</text>
+        <rect x="300" y="10" width="160" height="36" rx="8" fill="#16a34a"/>
+        <text x="380" y="32" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">API 服务器</text>
+        <rect x="580" y="10" width="120" height="36" rx="8" fill="#dc2626"/>
+        <text x="640" y="32" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">攻击者</text>
+
+        <line x1="85" y1="46" x2="85" y2="380" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="380" y1="46" x2="380" y2="380" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="640" y1="46" x2="640" y2="380" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="90" y1="90" x2="375" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <text x="232" y="82" text-anchor="middle" font-size="12" fill="#1c2333">① GET /spaces/42</text>
+
+        <line x1="375" y1="126" x2="90" y2="126" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <text x="232" y="118" text-anchor="middle" font-size="12" fill="#1c2333">② 200 OK，ETag: "42"</text>
+
+        <line x1="90" y1="162" x2="375" y2="162" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <text x="232" y="154" text-anchor="middle" font-size="12" fill="#1c2333">③ PUT /spaces/42，If-Matches: "42"（合法更新）</text>
+
+        <line x1="235" y1="168" x2="630" y2="204" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrowRed)"/>
+        <text x="500" y="196" text-anchor="middle" font-size="12" fill="#dc2626">④ 攻击者截获这条请求的密文副本</text>
+
+        <line x1="375" y1="234" x2="90" y2="234" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <text x="232" y="226" text-anchor="middle" font-size="12" fill="#1c2333">⑤ 200 OK，ETag: "43"（资源已更新）</text>
+
+        <line x1="635" y1="278" x2="385" y2="278" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+        <text x="510" y="270" text-anchor="middle" font-size="12" fill="#dc2626">⑥ 重放同一条 PUT，If-Matches: "42"</text>
+
+        <line x1="385" y1="322" x2="635" y2="322" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+        <text x="510" y="314" text-anchor="middle" font-size="12" fill="#d97706">⑦ 412 Precondition Failed（当前 ETag 是 43，不匹配）</text>
+      </svg>
+      <figcaption>图 13-2：攻击者截获一条合法的 PUT 请求并原样重放；由于资源的 ETag 在此期间已经从 "42" 变成 "43"，服务端能识别出这是一条过期请求并拒绝。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>设备 / 合法客户端</span>
+        <span><span class="dot" style="background:#16a34a"></span>API 服务器</span>
+        <span><span class="dot" style="background:#dc2626"></span>攻击者（截获并重放请求）</span>
+      </div>
+    </figure>
+
+    <p>
+      下面这段 Java 用一个 <code class="inline">AtomicInteger</code> 模拟资源的 ETag：更新前先原子地比较并递增（<code class="inline">compareAndSet</code>），成功才算数，这本质上就是把"单调递增计数器"这套防重放思路用在了 REST 语义上。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/ReplayProtectionExample.java（节选）</div>
+        <pre><code>var etag = new AtomicInteger(42);
+put("/test", (request, response) -&gt; {
+    var expectedEtag = parseInt(request.headers("If-Matches"));
+
+    if (!etag.compareAndSet(expectedEtag, expectedEtag + 1)) {
+        response.status(412);
+        return null;
+    }
+
+    System.out.println("Updating resource with new content: " +
+            request.attribute("decryptedRequest"));
+
+    response.status(200);
+    response.header("ETag", String.valueOf(expectedEtag + 1));
+    response.type("text/plain");
+    return "OK";
+});</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">spaces/views.py（教学示例）</div>
+        <pre><code>from django.db import transaction
+from django.http import HttpResponse
+
+@transaction.atomic
+def update_resource(request, resource_id):
+    expected_etag = int(request.headers["If-Matches"])
+
+    # 一条原子的 UPDATE ... WHERE etag = expected，等价于 Java 的 compareAndSet
+    updated = Resource.objects.filter(
+        pk=resource_id, etag=expected_etag
+    ).update(etag=expected_etag + 1, body=request.body)
+
+    if updated == 0:
+        return HttpResponse(status=412)  # Precondition Failed
+
+    return HttpResponse(
+        status=200,
+        headers={"ETag": str(expected_etag + 1)},
+    )</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/resource.ts（教学示例）</div>
+        <pre><code>import { Redis } from "ioredis";
+const redis = new Redis();
+
+// 用 Lua 脚本保证"比较并设置"是原子操作，等价于 AtomicInteger.compareAndSet
+const compareAndSetEtag = `
+  local current = tonumber(redis.call("GET", KEYS[1]))
+  if current == tonumber(ARGV[1]) then
+    redis.call("SET", KEYS[1], ARGV[2])
+    return 1
+  end
+  return 0
+`;
+
+app.put("/resource/:id", async (c) =&gt; {
+  const expectedEtag = Number(c.req.header("If-Matches"));
+  const key = `etag:${c.req.param("id")}`;
+
+  const ok = await redis.eval(compareAndSetEtag, 1, key,
+      expectedEtag, expectedEtag + 1);
+  if (ok === 0) {
+    return c.body(null, 412); // Precondition Failed
+  }
+
+  return c.text("OK", 200, { ETag: String(expectedEtag + 1) });
+});</code></pre>
+      </div>
+    </div>
+
+    <p>
+      如果链路上有多个不受信任的中间代理，仅仅认证 HTTP body 还不够——攻击者可以在不动 body 的前提下篡改头部字段（比如把 <code class="inline">If-Matches</code> 换成一个匹配的旧值）。解决办法是把方法、头部和 body 一起打包成一个<strong>请求对象（request object）</strong>，整体加密签名，服务端解密后逐项核对，任何一项跟实际收到的 HTTP 请求对不上就拒绝。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/ReplayProtectionExample.java（节选）</div>
+        <pre><code>before((request, response) -&gt; {
+    var encryptedRequest = CryptoBox.fromString(request.body());
+    var decrypted = encryptedRequest.decrypt(
+            serverKeys.getPrivate(), clientKeys.getPublic());
+    var cbor = CBORObject.DecodeFromBytes(decrypted);
+
+    if (!cbor.get("method").AsString()
+            .equals(request.requestMethod())) {
+        halt(403);
+    }
+
+    var expectedHeaders = cbor.get("headers");
+    for (var headerName : expectedHeaders.getKeys()) {
+        if (!expectedHeaders.get(headerName).AsString()
+                .equals(request.headers(headerName.AsString()))) {
+            halt(403);
+        }
+    }
+
+    request.attribute("decryptedRequest", cbor.get("body"));
+});</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">devices/middleware.py（教学示例）</div>
+        <pre><code>import cbor2
+from nacl.public import Box
+from django.http import HttpResponseForbidden
+
+server_box = Box(SERVER_PRIVATE_KEY, CLIENT_PUBLIC_KEY)  # 与 CryptoBox 同一构造
+
+class RequestObjectMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        decrypted = server_box.decrypt(request.body)
+        envelope = cbor2.loads(decrypted)
+
+        if envelope["method"] != request.method:
+            return HttpResponseForbidden()
+
+        for header_name, expected in envelope.get("headers", {}).items():
+            if request.headers.get(header_name) != expected:
+                return HttpResponseForbidden()
+
+        request.decrypted_body = envelope["body"]
+        return self.get_response(request)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/requestObject.ts（教学示例）</div>
+        <pre><code>import { box } from "tweetnacl";
+import { decode } from "cbor-x";
+import { createMiddleware } from "hono/factory";
+
+export const requestObject = createMiddleware(async (c, next) =&gt; {
+  const raw = new Uint8Array(await c.req.arrayBuffer());
+  const nonce = raw.slice(0, box.nonceLength);
+  const decrypted = box.open(
+    raw.slice(box.nonceLength), nonce, clientPublicKey, serverSecretKey);
+  if (!decrypted) return c.text("Forbidden", 403);
+
+  const envelope = decode(decrypted) as
+    { method: string; headers: Record&lt;string, string&gt;; body: unknown };
+
+  if (envelope.method !== c.req.method) return c.text("Forbidden", 403);
+  for (const [name, expected] of Object.entries(envelope.headers)) {
+    if (c.req.header(name) !== expected) return c.text("Forbidden", 403);
+  }
+
+  c.set("decryptedBody", envelope.body);
+  await next();
+});</code></pre>
+      </div>
+    </div>
+
+    <div class="callout danger">
+      <div class="title">☠️ 千万别用请求对象里的字段覆盖真实的 HTTP 请求</div>
+      <p>
+        校验请求对象时，只能用它去<strong>核对</strong>实际收到的方法和头部是否一致，绝不能反过来用请求对象里的值去替换真实请求——否则攻击者可以用一个合法签名的请求对象，绕过 Web 应用防火墙等基于真实 HTTP 方法/头部做的安全检查。
+      </p>
+    </div>
+
+    <h2 id="s3"><span class="num">13.3</span>面向受限环境的 OAuth2</h2>
+    <p>
+      OAuth2 在这本书里反复出现，从 Web 应用一路延伸到移动端、服务间调用、微服务，现在轮到 IoT。特别适合消费级场景：智能电视登录视频网站、智能音箱绑定音乐账号，本质都是"用户把自己的一部分权限，委托给一台设备去用"，这正是 OAuth2 天生要解决的问题。但传统的 OAuth2 流程默认设备有浏览器、能重定向、用户能在设备上打字——这些假设在 IoT 世界里往往都不成立。
+    </p>
+
+    <h3>13.3.1 设备授权许可（Device Authorization Grant）</h3>
+    <p>
+      OAuth2 的<strong>设备授权许可</strong>（RFC 8628，也叫 device flow）就是为了解决"设备没有屏幕/键盘"这个问题设计的：让用户改用手边的另一台设备（手机、电脑）去完成授权。你在智能电视上登录 YouTube、在游戏机上登录 Xbox 账号时看到的"请在手机浏览器打开某网址，输入这个 8 位代码"，用的就是这套流程。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 450" role="img" aria-label="OAuth2 设备授权许可完整时序图">
+        <defs>
+          <marker id="arrowDg" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+          <marker id="arrowDo" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#d97706"/>
+          </marker>
+          <marker id="arrowDgn" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#16a34a"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="140" height="40" rx="8" fill="#2563eb"/>
+        <text x="90" y="34" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">IoT 设备</text>
+        <rect x="330" y="10" width="140" height="40" rx="8" fill="#0891b2"/>
+        <text x="400" y="34" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">认证服务器（AS）</text>
+        <rect x="610" y="10" width="140" height="40" rx="8" fill="#2563eb"/>
+        <text x="680" y="28" text-anchor="middle" fill="#fff" font-size="12">用户的</text>
+        <text x="680" y="42" text-anchor="middle" fill="#fff" font-size="12">手机 / 浏览器</text>
+
+        <line x1="90" y1="54" x2="90" y2="430" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="400" y1="54" x2="400" y2="430" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="680" y1="54" x2="680" y2="430" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="95" y1="94" x2="395" y2="94" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="245" y="86" text-anchor="middle" font-size="12" fill="#1c2333">① POST /device_authorization {client_id, scope}</text>
+
+        <line x1="395" y1="130" x2="95" y2="130" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="245" y="122" text-anchor="middle" font-size="11.5" fill="#1c2333">② 200 {device_code, user_code, verification_uri, interval:5}</text>
+
+        <path d="M 90,166 h55 v14 h-55" fill="none" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="150" y="160" text-anchor="middle" font-size="11.5" fill="#1c2333">③ 设备显示：打开 verification_uri，输入 user_code</text>
+
+        <line x1="675" y1="210" x2="405" y2="210" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="540" y="202" text-anchor="middle" font-size="12" fill="#1c2333">④ 打开 verification_uri 并登录</text>
+
+        <line x1="675" y1="246" x2="405" y2="246" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="540" y="238" text-anchor="middle" font-size="12" fill="#1c2333">⑤ 输入 user_code，批准 scope</text>
+
+        <rect x="40" y="266" width="440" height="70" fill="none" stroke="#9aa4bf" stroke-width="1.2" stroke-dasharray="5 4" rx="6"/>
+        <text x="52" y="282" class="loopbox-label">loop：每 interval 秒轮询一次（收到 slow_down 则 +5 秒）</text>
+
+        <line x1="95" y1="304" x2="395" y2="304" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="245" y="298" text-anchor="middle" font-size="11" fill="#1c2333">⑥ POST /token（grant_type=device_code, device_code）</text>
+
+        <line x1="395" y1="328" x2="95" y2="328" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrowDo)"/>
+        <text x="245" y="322" text-anchor="middle" font-size="11" fill="#d97706">⑦ 400 {error: "authorization_pending"}</text>
+
+        <text x="400" y="356" text-anchor="middle" font-size="11.5" fill="#5b6478">（用户完成 ⑤ 批准之后……）</text>
+
+        <line x1="95" y1="376" x2="395" y2="376" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowDg)"/>
+        <text x="245" y="370" text-anchor="middle" font-size="12" fill="#1c2333">⑧ 再次轮询 POST /token</text>
+
+        <line x1="395" y1="410" x2="95" y2="410" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrowDgn)"/>
+        <text x="245" y="404" text-anchor="middle" font-size="11.5" fill="#16a34a">⑨ 200 {access_token, refresh_token, expires_in}</text>
+      </svg>
+      <figcaption>图 13-3：设备先向 AS 换取 device_code / user_code / verification_uri；用户在手机或电脑上访问验证页面、输入 user_code 完成授权；设备在后台按固定间隔轮询令牌端点，直到拿到 access_token。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>IoT 设备 / 用户的手机（同为客户端角色）</span>
+        <span><span class="dot" style="background:#0891b2"></span>认证服务器（AS）</span>
+        <span><span class="dot" style="background:#d97706"></span>轮询中（authorization_pending）</span>
+        <span><span class="dot" style="background:#16a34a"></span>轮询成功，拿到令牌</span>
+      </div>
+    </figure>
+
+    <p>轮询令牌端点时，AS 可能返回下面几种状态，设备需要分别处理：</p>
+    <table>
+      <thead><tr><th>返回的 error</th><th>含义</th><th>设备该怎么做</th></tr></thead>
+      <tbody>
+        <tr><td><code class="inline">authorization_pending</code></td><td class="mech">用户还没批准也没拒绝</td><td class="mech">按原间隔继续等待、下次再轮询</td></tr>
+        <tr><td><code class="inline">slow_down</code></td><td class="mech">轮询太频繁</td><td class="mech">把轮询间隔增加 5 秒，忽略提示可能被 AS 撤销授权</td></tr>
+        <tr><td><code class="inline">access_denied</code></td><td class="mech">用户明确拒绝了这次请求</td><td class="mech">终止流程，提示用户</td></tr>
+        <tr><td><code class="inline">expired_token</code></td><td class="mech">device_code 已过期，用户没在有效期内完成授权</td><td class="mech">重新发起一次 ① 的流程，拿新的 device_code / user_code</td></tr>
+      </tbody>
+    </table>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/DeviceGrantClient.java（节选）</div>
+        <pre><code>private static JSONObject beginDeviceAuthorization(
+        String clientId, String scope) throws Exception {
+    var form = "client_id=" + URLEncoder.encode(clientId, UTF_8) +
+            "&scope=" + URLEncoder.encode(scope, UTF_8);
+    var request = HttpRequest.newBuilder()
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .uri(URI.create("https://as.example.com/device_authorization"))
+            .POST(BodyPublishers.ofString(form))
+            .build();
+    var response = httpClient.send(request, BodyHandlers.ofString());
+    return new JSONObject(response.body());
+}
+
+public static void main(String... args) throws Exception {
+    var json = beginDeviceAuthorization("deviceGrantTest", "a b c");
+    var deviceCode = json.getString("device_code");
+    var interval = json.optInt("interval", 5);
+    System.out.println("Please open " + json.getString("verification_uri"));
+    System.out.println("And enter code:\n\t" + json.getString("user_code"));
+
+    while (true) {
+        Thread.sleep(TimeUnit.SECONDS.toMillis(interval));
+        json = pollAccessTokenEndpoint("deviceGrantTest", deviceCode);
+        var error = json.optString("error", null);
+        if (error == null) {
+            System.out.println("Access token: " + json.getString("access_token"));
+            break;
+        }
+        if (error.equals("slow_down")) interval += 5;
+        else if (!error.equals("authorization_pending")) {
+            System.err.println("Authorization failed: " + error);
+            System.exit(1);
+        }
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">device_client.py（教学示例，运行在设备/设备模拟器上）</div>
+        <pre><code>import time
+import requests
+
+AS_BASE = "https://as.example.com"
+
+def begin_device_authorization(client_id: str, scope: str) -&gt; dict:
+    resp = requests.post(f"{AS_BASE}/device_authorization",
+        data={"client_id": client_id, "scope": scope})
+    resp.raise_for_status()
+    return resp.json()
+
+def poll_access_token(client_id: str, device_code: str) -&gt; dict:
+    resp = requests.post(f"{AS_BASE}/token", data={
+        "client_id": client_id,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code": device_code,
+    })
+    return resp.json()
+
+def main():
+    data = begin_device_authorization("deviceGrantTest", "a b c")
+    device_code = data["device_code"]
+    interval = data.get("interval", 5)
+    print(f"请打开 {data['verification_uri']}")
+    print(f"并输入代码：{data['user_code']}")
+
+    while True:
+        time.sleep(interval)
+        data = poll_access_token("deviceGrantTest", device_code)
+        error = data.get("error")
+        if error is None:
+            print("Access token:", data["access_token"])
+            break
+        if error == "slow_down":
+            interval += 5
+        elif error != "authorization_pending":
+            raise RuntimeError(f"Authorization failed: {error}")
+
+if __name__ == "__main__":
+    main()</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">device-client.ts（教学示例，运行在设备端）</div>
+        <pre><code>const AS_BASE = "https://as.example.com";
+
+async function beginDeviceAuthorization(clientId: string, scope: string) {
+  const res = await fetch(`${AS_BASE}/device_authorization`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: clientId, scope }),
+  });
+  return res.json();
+}
+
+async function pollAccessToken(clientId: string, deviceCode: string) {
+  const res = await fetch(`${AS_BASE}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: deviceCode,
+    }),
+  });
+  return res.json();
+}
+
+async function main() {
+  let data = await beginDeviceAuthorization("deviceGrantTest", "a b c");
+  const deviceCode = data.device_code;
+  let interval = data.interval ?? 5;
+  console.log(`请打开 ${data.verification_uri}`);
+  console.log(`并输入代码：${data.user_code}`);
+
+  while (true) {
+    await new Promise((r) =&gt; setTimeout(r, interval * 1000));
+    data = await pollAccessToken("deviceGrantTest", deviceCode);
+    if (!data.error) {
+      console.log("Access token:", data.access_token);
+      break;
+    }
+    if (data.error === "slow_down") interval += 5;
+    else if (data.error !== "authorization_pending") {
+      throw new Error(`Authorization failed: ${data.error}`);
+    }
+  }
+}
+
+main();</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ 小细节：verification_uri_complete</div>
+      <p>
+        很多 AS 会额外返回一个 <code class="inline">verification_uri_complete</code> 字段，把验证地址和 <code class="inline">user_code</code> 拼在一起编码成一个链接（或二维码）。用户扫码或点开链接就能直接跳过手动输入代码这一步，这也是为什么很多设备喜欢在屏幕上直接展示一个二维码而不是让用户手敲代码。
+      </p>
+    </div>
+
+    <h3>13.3.2 ACE-OAuth</h3>
+    <p>
+      IETF 的 ACE（Authorization for Constrained Environments）工作组一直在把 OAuth2 适配到更受限的设备上，主要成果是 ACE-OAuth 框架：把 OAuth2 的授权请求/响应从 HTTP+JSON 换成 CoAP+CBOR，用 COSE 作为访问令牌和"持有证明（Proof-of-Possession，PoP）"的标准格式。和传统 OAuth2 默认用不记名（bearer）令牌不同，ACE-OAuth 从设计之初就要求令牌绑定到一个密钥上——拿到令牌还不够，还得能证明自己持有对应的私钥或对称密钥（这和第 11 章讲的 PoP 令牌是同一个思路，只是搬到了 CBOR/COSE 的世界）。
+    </p>
+    <div class="callout note">
+      <div class="title">💡 这一节同样是协议层内容</div>
+      <p>
+        ACE-OAuth 跑在 CoAP 之上、用 CBOR 编码，本质是给嵌入式设备准备的 OAuth2"平行版本"，和 Django/Hono 这类基于 HTTP+JSON 的框架不是一回事，所以这里不给三栏代码对比。写这本书时 ACE-OAuth 规范还在标准化过程中（截至目前，设备授权许可尚未被纳入 ACE-OAuth 的授权类型列表）；如果你真的要在 Python/Node 里实现 CoAP + COSE 相关能力，前面提到的 <code class="inline">aiocoap</code> 和 <code class="inline">cose-js</code> 依然是现实中能用到的库。
+      </p>
+    </div>
+
+    <h2 id="s4"><span class="num">13.4</span>离线访问控制</h2>
+    <p>
+      很多 IoT 场景里，设备没法一直连着中央授权服务：网约车驶入长隧道，联网汽车开到信号盲区，电池供电的传感器为了省电主动少发请求。设备不应该因为暂时联系不上云端就干脆"罢工"，所以需要一套办法，让它在离线状态下也能就地做出正确的安全决定——这叫<strong>离线授权（offline authorization）</strong>。当然，离线通常意味着更高的风险：设备没法实时核实一个令牌是不是已经被吊销，所以要不要允许离线模式、离线状态下能做哪些操作、离线多久还继续信任，都需要按你的业务风险权衡决定。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 380" role="img" aria-label="设备在线与离线两种状态下如何做访问控制决策的对比图">
+        <text x="20" y="26" font-size="13" font-weight="600" fill="#1c2333">在线：设备能连上云端时</text>
+        <rect x="20" y="40" width="130" height="40" rx="8" fill="#2563eb"/>
+        <text x="85" y="64" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">设备</text>
+        <rect x="560" y="40" width="140" height="40" rx="8" fill="#0891b2"/>
+        <text x="630" y="54" text-anchor="middle" fill="#fff" font-size="12">云端 AS /</text>
+        <text x="630" y="70" text-anchor="middle" fill="#fff" font-size="12">策略引擎</text>
+
+        <line x1="155" y1="100" x2="555" y2="100" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="357" y="92" text-anchor="middle" font-size="12" fill="#1c2333">① 请求校验 token / 查询权限策略</text>
+
+        <line x1="555" y1="130" x2="155" y2="130" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="357" y="122" text-anchor="middle" font-size="12" fill="#1c2333">② 返回：允许 / 拒绝</text>
+
+        <line x1="20" y1="165" x2="700" y2="165" stroke="#e2e5ee" stroke-width="1" stroke-dasharray="3 3"/>
+
+        <text x="20" y="192" font-size="13" font-weight="600" fill="#1c2333">离线：设备联系不上云端时</text>
+        <rect x="20" y="206" width="130" height="40" rx="8" fill="#2563eb"/>
+        <text x="85" y="230" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">设备</text>
+        <rect x="560" y="206" width="140" height="40" rx="8" fill="#0891b2" fill-opacity="0.35"/>
+        <text x="630" y="230" text-anchor="middle" fill="#1c2333" font-size="12">云端 AS（不可达）</text>
+
+        <line x1="155" y1="226" x2="555" y2="226" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="5 5"/>
+        <line x1="345" y1="216" x2="365" y2="236" stroke="#dc2626" stroke-width="2"/>
+        <line x1="345" y1="236" x2="365" y2="216" stroke="#dc2626" stroke-width="2"/>
+        <text x="355" y="208" text-anchor="middle" font-size="12" font-weight="600" fill="#dc2626">✕ 网络中断</text>
+
+        <rect x="20" y="284" width="340" height="66" rx="8" fill="#7c3aed" fill-opacity="0.12" stroke="#7c3aed" stroke-width="1.2"/>
+        <text x="190" y="310" text-anchor="middle" font-size="11.5" fill="#1c2333">本地缓存：设备信任的公钥 / 权限策略</text>
+        <text x="190" y="330" text-anchor="middle" font-size="11.5" fill="#1c2333">自包含令牌：签名 JWT 或 macaroon</text>
+        <text x="190" y="346" text-anchor="middle" font-size="11.5" fill="#1c2333">（含 scope、有效期、caveats）</text>
+
+        <line x1="85" y1="246" x2="150" y2="284" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+        <text x="130" y="270" text-anchor="middle" font-size="11" fill="#1c2333">③ 读取本地缓存</text>
+
+        <rect x="420" y="284" width="260" height="66" rx="8" fill="#16a34a" fill-opacity="0.12" stroke="#16a34a" stroke-width="1.2"/>
+        <text x="550" y="308" text-anchor="middle" font-size="11.5" fill="#1c2333">④ 本地校验签名 + 检查</text>
+        <text x="550" y="326" text-anchor="middle" font-size="11.5" fill="#1c2333">scope / issuer / expiry / caveats</text>
+        <text x="550" y="344" text-anchor="middle" font-size="11.5" fill="#16a34a" font-weight="600">→ 允许或拒绝，全程无需联网</text>
+
+        <line x1="360" y1="317" x2="415" y2="317" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow1)"/>
+      </svg>
+      <figcaption>图 13-4：在线时设备直接向云端 AS / 策略引擎请求校验；离线时设备转而依赖本地缓存的公钥、策略和自包含令牌（签名 JWT 或 macaroon），独立完成签名校验和 scope/有效期/caveats 检查，全程不需要联网。</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>设备</span>
+        <span><span class="dot" style="background:#0891b2"></span>云端 AS / 策略引擎</span>
+        <span><span class="dot" style="background:#7c3aed"></span>本地缓存 / 自包含令牌</span>
+        <span><span class="dot" style="background:#16a34a"></span>本地决策结果</span>
+      </div>
+    </figure>
+
+    <h3>13.4.1 离线用户认证</h3>
+    <p>
+      有些设备完全不需要和用户打交道，但另一些场景恰恰相反——比如智能快递柜：用户线上下单，货物送到柜子里，用户到场后需要在没有可靠网络的柜机前证明"我就是这个包裹的收件人"。工业设备平时自主运行，但偶尔需要工程师现场维护，维护往往正是"什么都出问题了"的时候，你不能指望这时候云端服务一定在线。
+    </p>
+    <div class="callout danger">
+      <div class="title">☠️ 别把密码哈希下发到设备上</div>
+      <p>
+        一个看起来"够用"但很危险的做法是把用户的密码哈希同步到设备本地，设备自己核对。这非常危险：如果设备被攻破，攻击者能直接拿到哈希去做离线字典攻击；更糟的是，如果攻击者已经攻陷了设备，那用户在设备上现场输入密码时，攻击者干脆就能直接截获明文密码。
+      </p>
+    </div>
+    <p>
+      更安全的做法是签发一个<strong>短期、权限收窄</strong>的凭据，只能用来操作这一台设备。比如快递柜场景：云端给用户生成一个一次性验证码，用户手机上以二维码形式展示；同一个验证码经过哈希后，提前同步给柜机。用户扫码时，柜机现场计算哈希，和本地存的哈希一致就开柜、并立即作废这个码——全程柜机不需要联网核对。对需要更长期访问权限的场景（比如维护工程师），可以让工程师提前在联网状态下向 AS 认证，换到一个自包含的访问令牌或 ID 令牌，令牌里绑定一个公钥或临时凭据（比如第 11 章讲的客户端证书，或本章前面提到的 PoP 令牌）；工程师到现场后通过蓝牙等本地连接把令牌交给设备，设备只需要本地验证签名、检查 scope、签发者、受众和有效期，就能放行——这个过程完全不需要联网查库。
+    </p>
+
+    <h3>13.4.2 离线授权</h3>
+    <p>
+      离线认证解决的是"这是谁"，离线<strong>授权</strong>解决的是"TA 能做什么"。很多场景的策略足够简单，可以直接硬编码在设备里：只要凭证来自可信来源就放行，其余一律拒绝。但复杂场景的访问控制往往依赖动态条件，第 8 章讲过可以用中心化的策略引擎统一管理，可策略引擎一旦不可达，设备又要怎么办？
+    </p>
+    <p>
+      办法和离线认证类似：设备定期从云端拉取最新策略缓存在本地（可以用第 8 章提到的 XACML，也可以自己设计一套更轻量的 CBOR 编码策略格式），或者干脆用<strong>自包含令牌</strong>把权限直接编码进去——访问令牌里的 <code class="inline">scope</code> 字段本身就足够让离线设备判断"这个客户端能不能调这个操作"。更灵活的是第 9 章讲过的 <strong>macaroon</strong>：它允许在令牌传递链路的任何一环追加 caveat（限制条件），而且不需要联系颁发者就能被拿到令牌的一方本地验证。
+    </p>
+    <div class="callout tip">
+      <div class="title">✅ 一个具体例子：租车场景</div>
+      <p>
+        你用手机预订了一辆车，云端下发一个 macaroon 格式的访问令牌到手机上，靠近车辆时通过蓝牙把令牌传给车载系统解锁——这一步复用了 13.4.1 的本地凭据交付思路。晚上你开车去一个信号很差的高级酒店，代客泊车服务需要短暂驾驶你的车，但你不完全信任代客——因为令牌是 macaroon，你可以当场、离线地给它追加两条 caveat："10 分钟后过期"和"只能在酒店半径 400 米内行驶"，车辆本地就能验证这些限制，完全不需要联系任何服务器。第三方 caveat 甚至能做到"这个操作需要另一个 API 事先授权"，只要客户端提前拿到对应的兑现凭据（discharge macaroon），设备照样可以离线验证，不用直接联系第三方。
+      </p>
+    </div>
+    <p>
+      离线校验一个自包含令牌，本质上就是"设备本地存一份签发者的公钥，不联网只做本地签名验证 + 声明校验"。下面这段 Java 摘自本项目里已有的一个 JWT 访问令牌校验实现：它原本用 <code class="inline">RemoteJWKSet</code> 去远程拉取签发者的公钥集合；要让它在真正离线时也能工作，只需要把这个远程 <code class="inline">JWKSource</code> 换成一个联网时预先下载、缓存在本地的版本，校验逻辑（验签名、核对 <code class="inline">iss</code>/<code class="inline">aud</code>/<code class="inline">exp</code>/<code class="inline">scope</code>）完全不用变。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/token/SignedJwtAccessTokenStore.java（节选，离线场景下需把 jwkSource 换成本地缓存的 JWKSource）</div>
+        <pre><code>public Optional&lt;Token&gt; read(Request request, String tokenId) {
+    try {
+        var verifier = new DefaultJWTProcessor&lt;&gt;();
+        var keySelector = new JWSVerificationKeySelector&lt;&gt;(
+                signatureAlgorithm, jwkSource); // 离线时改用本地缓存的 JWKSource
+        verifier.setJWSKeySelector(keySelector);
+
+        var claims = verifier.process(tokenId, null);
+
+        if (!expectedIssuer.equals(claims.getIssuer())) {
+            return Optional.empty();
+        }
+        if (!claims.getAudience().contains(expectedAudience)) {
+            return Optional.empty();
+        }
+
+        var expiry = claims.getExpirationTime().toInstant();
+        var token = new Token(expiry, claims.getSubject());
+        token.attributes.put("scope", claims.getStringClaim("scope"));
+        return Optional.of(token);
+
+    } catch (ParseException | BadJOSEException | JOSEException e) {
+        return Optional.empty();
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">offline_auth.py（教学示例，跑在设备本地，不联网、不查库）</div>
+        <pre><code>import jwt
+from jwt import InvalidTokenError
+
+# 联网时提前下载并缓存到本地文件 / 安全存储里的 AS 公钥
+with open("cached_as_public_key.pem", "rb") as f:
+    CACHED_PUBLIC_KEY = f.read()
+
+def verify_offline(token: str, expected_issuer: str,
+                    expected_audience: str) -&gt; dict | None:
+    try:
+        # pyjwt 本地校验签名、iss/aud/exp，全程不发起网络请求
+        claims = jwt.decode(
+            token, CACHED_PUBLIC_KEY, algorithms=["ES256"],
+            issuer=expected_issuer, audience=expected_audience,
+        )
+        return claims
+    except InvalidTokenError:
+        return None</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">offline-auth.ts（教学示例，跑在设备本地）</div>
+        <pre><code>import { jwtVerify, importJWK } from "jose";
+
+// 联网时预先下载并缓存的 AS 公钥（JWK）
+const cachedKey = await importJWK(cachedJwk, "ES256");
+
+export async function verifyOffline(
+  token: string, expectedIssuer: string, expectedAudience: string,
+) {
+  try {
+    // jose 本地校验签名 + iss/aud/exp，不发起任何网络请求
+    const { payload } = await jwtVerify(token, cachedKey, {
+      issuer: expectedIssuer,
+      audience: expectedAudience,
+    });
+    return payload;
+  } catch {
+    return null;
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s5"><span class="num">§</span>本章小结</h2>
+    <ul>
+      <li>设备可以用一份"设备档案"（预共享密钥 + 厂商型号等信息）来标识自己，档案可以存中心数据库，也可以做成一张自包含证书（比如带加密 PSK 的 JWT）随设备携带。</li>
+      <li>如果设备和 API 直连，认证可以完全交给传输层（TLS/DTLS 的 PSK 套件、或客户端证书）；服务端在握手过程中查到设备身份，握手完成后才可信任这个身份。</li>
+      <li>如果链路要穿过不受信任的中间环节，就需要端到端认证——记住这个公式：<strong>实体认证 = 消息认证 + 新鲜性（freshness）</strong>。新鲜性可以靠时间戳、nonce/单调计数器、或挑战-响应协议来保证，防重放本质上都要求服务端保存一些和客户端相关的状态。</li>
+      <li>REST API 可以用 <code class="inline">ETag</code> + <code class="inline">If-Matches</code> 这类标准 HTTP 机制，把"资源当前版本"当作事实上的防重放计数器；穿过不可信代理时，把方法、头部和 body 打包成一个整体加密签名的请求对象，能防止中间环节篡改头部。</li>
+      <li>OAuth2 的设备授权许可让没有输入设备的设备也能拿到用户批准的访问令牌，流程是"设备换 device_code / user_code → 用户在另一台设备上批准 → 设备后台轮询直到成功"；ACE-OAuth 则是把整套 OAuth2 语义搬到 CoAP/CBOR/COSE 上，服务同样受限的设备。</li>
+      <li>设备不一定总能连上中央服务，离线场景下可以依赖短期凭据、本地缓存的公钥/策略、以及自包含令牌（JWT 的 scope/exp、或 macaroon 的 caveats）来独立做出访问控制决定，只是要清楚这样做意味着牺牲了"实时撤销"的能力，需要按风险权衡使用范围。</li>
+    </ul>
+
+    <h2 id="s6"><span class="num">✦</span>全书回顾</h2>
+    <p>
+      到这里，你已经跟着 Natter 这个小小的社交 API，从一个"能跑就行"的裸奔应用，一路加固到能扛住注入攻击、会话劫持、令牌伪造、越权访问、服务间冒充，一直到本章讲的设备伪造和重放攻击。回头看会发现，贯穿全书的其实只有五件事反复出现，只是每一章都在不同的运行环境（浏览器、移动端、微服务集群、物联网设备）下把它们重新实现了一遍：<strong>认证（我是谁）、授权（我能做什么）、加密（数据别被看懂/改动）、审计（出事之后查得到）、限流（别被压垮）</strong>。下面这张表按章节顺序帮你把它们串起来：
+    </p>
+    <table class="review-table">
+      <thead><tr><th>章节</th><th>主题</th><th>本教程系列讲过的核心机制</th></tr></thead>
+      <tbody>
+        <tr><td class="ch">第 2 章</td><td>安全的 API 开发基础</td><td class="mech">SQL 注入与参数化查询、输入校验、XSS 与安全输出转义</td></tr>
+        <tr><td class="ch">第 3 章</td><td>给 Natter API 打基础</td><td class="mech">限流（可用性）、密码认证（Scrypt 哈希）、HTTPS/HSTS（加密）、审计日志、访问控制列表（ACL）</td></tr>
+        <tr><td class="ch">第 4 章</td><td>基于 Session Cookie 的认证</td><td class="mech">Cookie 会话、CSRF 防护（SameSite、双重提交 Cookie）</td></tr>
+        <tr><td class="ch">第 5 章</td><td>现代令牌认证</td><td class="mech">CORS、数据库令牌（Token Store）、Bearer 令牌、哈希/HMAC 加固令牌存储</td></tr>
+        <tr><td class="ch">第 6 章</td><td>自包含令牌与 JWT</td><td class="mech">JWT 签发与校验、用 NaCl/COSE 做认证加密、加密 JWT、令牌撤销</td></tr>
+        <tr><td class="ch">第 7 章</td><td>OAuth2 与 OpenID Connect</td><td class="mech">授权码授权类型 + PKCE、令牌自省、JWT 访问令牌、OIDC 单点登录</td></tr>
+        <tr><td class="ch">第 8 章</td><td>基于身份的访问控制</td><td class="mech">用户与用户组、基于角色的访问控制（RBAC）、基于属性的访问控制（ABAC）</td></tr>
+        <tr><td class="ch">第 9 章</td><td>基于能力的安全与 Macaroon</td><td class="mech">Capability URI、HATEOAS、Macaroon 令牌与 caveat（含第三方 caveat）</td></tr>
+        <tr><td class="ch">第 10 章</td><td>Kubernetes 中的微服务 API</td><td class="mech">容器化部署、服务网格、网络策略、网关处理入站请求</td></tr>
+        <tr><td class="ch">第 11 章</td><td>保护服务间 API</td><td class="mech">API Key / JWT bearer 认证、OAuth2 客户端凭证授权、mTLS 双向认证、Kubernetes Secret 管理</td></tr>
+        <tr><td class="ch">第 12 章</td><td>保护物联网通信</td><td class="mech">DTLS、预共享密钥（PSK）、端到端加密（COSE/CBOR）、密钥分发与管理</td></tr>
+        <tr><td class="ch">第 13 章（本章）</td><td>保护物联网 API</td><td class="mech">设备身份认证、端到端防重放（freshness）、OAuth2 设备授权许可、离线访问控制</td></tr>
+      </tbody>
+    </table>
+    <p>
+      如果只留一句话给读完全书的你：安全从来不是加一个写着"认证"或"访问控制"的方框就完事了——你必须清楚每一层机制到底保证了什么、又在什么条件下会失效。密码认证防不住重放，JWT 签名防不住令牌泄露后被冒用，mTLS 防不住应用层的越权访问。真正安全的系统，是把这些机制按照真实的威胁模型一层一层叠起来的结果，而不是迷信某一种"银弹"技术。希望这十三章的旅程，能让你在写下一行认证或授权代码之前，多问一句"这到底防住了什么，又没防住什么"。
+    </p>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch12/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 12 章：保护物联网通信</span></a>
+      <a class="next" href="../index.html"><span class="lbl">全书完</span><span class="ttl">返回目录 →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

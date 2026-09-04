@@ -1,0 +1,1149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 11 章：保护服务间调用的 API · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+<style>
+  .badge-box { font-size: 11px; fill: #1c2333; }
+  .diagram .stub { stroke: #5b6478; stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">11.1 API Key 与 JWT Bearer 认证</a>
+      <a href="#s2">11.2 OAuth2 客户端凭据许可</a>
+      <a href="#s3">11.3 OAuth2 的 JWT Bearer 许可</a>
+      <a href="#s4">11.4 双向 TLS 认证（mTLS）</a>
+      <a href="#s5">11.5 管理服务凭据</a>
+      <a href="#s6">11.6 响应用户请求时的服务间调用</a>
+      <a href="#s7">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 11 章</span>
+    <h1>保护服务间调用的 API</h1>
+    <p class="subtitle">当调用 API 的不是一个人，而是另一个程序时，认证和授权要怎么做？</p>
+
+    <p>前面十章讲的都是"人"怎么访问 API：用户输入密码、拿到 Cookie 或令牌、浏览器带着它去访问受保护的资源。但现实中的系统里，绝大多数 API 调用其实发生在服务和服务之间，压根没有人在场。比如 Natter 项目里，社交空间里的消息链接需要生成预览图，这就要有一个 <code class="inline">LinkPreviewer</code> 服务代表 Natter API 去抓取外部网页；又比如 Natter API 本身要向后台的认证服务器（AS）验证一个访问令牌是否还有效。这些调用没有用户按下回车，只有一个程序在向另一个程序证明"我是谁、我有权限做这件事"。</p>
+
+    <p>打个比方：前面章节讲的是"顾客怎么证明自己是本人"（身份证、密码、指纹），这一章讲的是"公司之间怎么对接"——供应商的下单系统要自动向仓库的发货系统下单，它靠的不是身份证，而是一份提前登记好的"合作协议"或者一枚"公章"。协议可以是长期有效的密码（API Key），可以是双方提前登记好公钥、每次自己签一份"授权书"（JWT），也可以是更重的、需要提前面签的"实体印章"（TLS 客户端证书）。这一章会依次讲这几种机制，越往后越安全，但也越复杂，你需要根据实际的信任程度来选择。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是服务对服务（service-to-service）认证</div>
+      <p>服务对服务认证解决的是"谁在调用我"，而不是"这次调用是为了哪个用户"。调用方通常是另一个后端服务、合作伙伴的系统，或者是自动化脚本。因为服务账号往往被赋予比普通用户更大的权限（比如整个数据库的读写权限），一旦服务凭据泄露，破坏力通常比单个用户账号被盗更大，所以本章的机制总体上比之前章节的用户认证更严格。</p>
+    </div>
+
+    <h2 id="s1"><span class="num">11.1</span>API Key 与 JWT Bearer 认证</h2>
+
+    <p>最简单的服务认证方式是 <strong>API Key</strong>：本质上就是一个长期有效的 bearer token（持有人令牌），只不过它标识的是一个服务或一家公司，而不是一个用户。开发者在"开发者门户"网站上登录、申请一个 API Key，然后把它复制到自己服务的配置里，之后每次请求都带上这个 Key（通常放在请求参数或自定义请求头里）。它的有效期往往是几个月甚至几年，而不是像用户令牌那样几分钟到几小时。</p>
+
+    <p>把 API Key 换成标准的 JSON Web Token 格式，就是 <strong>JWT Bearer 认证</strong>：开发者门户签发一个包含客户端信息和过期时间的 JWT，用签名或加密的方式保护它，客户端之后把这个 JWT 放进 <code class="inline">Authorization: Bearer &lt;jwt&gt;</code> 头里发送。用公钥签名的好处是，一个门户签发的令牌可以被很多个不同的 API 服务器验证——门户只需要保管私钥，每个 API 服务器只需要拿到对应的公钥即可，这正是第 7.4.4 节讲过的公钥签名 JWT 的用法。</p>
+
+    <div class="callout warn">
+      <div class="title">⚠️ JWT 依然是一枚“持有人令牌”</div>
+      <p>不管是普通 API Key 还是签名 JWT，只要是 bearer token，谁拿到它谁就能用，直到它过期为止。如果被一个恶意或者已经被攻破的 API 服务器截获，它完全可以拿这个令牌去冒充客户端访问别的 API。所以即使升级到 JWT，也一定要设置短的过期时间（<code class="inline">exp</code>）、限定受众（<code class="inline">aud</code>），把"被偷了也只能用很短时间、只能用在一个地方"作为兜底防线。</p>
+    </div>
+
+    <h2 id="s2"><span class="num">11.2</span>OAuth2 客户端凭据许可</h2>
+
+    <p>JWT Bearer 认证虽然思路简单，但你还是得自己搭一个"开发者门户"来签发和撤销令牌。OAuth2 早就为这种"没有用户参与，纯服务对服务"的场景准备了专门的许可类型：<strong>客户端凭据许可</strong>（Client Credentials Grant）。客户端直接用自己的身份向 AS 的令牌端点发起请求，不需要把用户重定向到登录页，AS 验证客户端身份后签发一个访问令牌，这个令牌之后可以像任何其他 OAuth2 访问令牌一样使用（校验、内省、撤销，都复用第 7 章讲过的机制）。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 380" role="img" aria-label="OAuth2 客户端凭据许可时序图">
+        <defs>
+          <marker id="a1-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a1-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a1-3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a1-4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a1-5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a1-6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+        <rect x="20" y="14" width="150" height="38" rx="8" fill="#2563eb"/>
+        <text x="95" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">服务客户端</text>
+        <rect x="285" y="14" width="150" height="38" rx="8" fill="#0891b2"/>
+        <text x="360" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">授权服务器 AS</text>
+        <rect x="550" y="14" width="150" height="38" rx="8" fill="#16a34a"/>
+        <text x="625" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">目标 API</text>
+
+        <line x1="95" y1="52" x2="95" y2="352" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="360" y1="52" x2="360" y2="352" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="625" y1="52" x2="625" y2="352" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="95" y1="104" x2="352" y2="104" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a1-1)"/>
+        <text x="228" y="86" text-anchor="middle" font-size="12" fill="#1c2333">① POST /oauth2/access_token</text>
+        <text x="228" y="98" text-anchor="middle" font-size="11.5" fill="#5b6478">grant_type=client_credentials&amp;scope=create_space</text>
+
+        <line x1="360" y1="152" x2="103" y2="152" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a1-2)"/>
+        <text x="228" y="144" text-anchor="middle" font-size="12" fill="#1c2333">② 200 OK { access_token, expires_in }</text>
+
+        <line x1="95" y1="192" x2="617" y2="192" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a1-3)"/>
+        <text x="360" y="184" text-anchor="middle" font-size="12" fill="#1c2333">③ GET /spaces  Authorization: Bearer &lt;access_token&gt;</text>
+
+        <line x1="625" y1="232" x2="368" y2="232" stroke="#5b6478" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a1-4)"/>
+        <text x="490" y="224" text-anchor="middle" font-size="12" fill="#1c2333">④ POST /oauth2/introspect  token=…</text>
+
+        <line x1="360" y1="280" x2="617" y2="280" stroke="#5b6478" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a1-5)"/>
+        <text x="490" y="262" text-anchor="middle" font-size="12" fill="#1c2333">⑤ 200 OK</text>
+        <text x="490" y="274" text-anchor="middle" font-size="11.5" fill="#5b6478">{ active: true, scope: "create_space", sub: "test" }</text>
+
+        <line x1="625" y1="328" x2="103" y2="328" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a1-6)"/>
+        <text x="360" y="320" text-anchor="middle" font-size="12" fill="#1c2333">⑥ 200 OK  业务数据</text>
+      </svg>
+      <figcaption>图 11-1：OAuth2 客户端凭据许可（Client Credentials Grant）时序图——客户端用自己的身份换令牌，再用令牌访问 API，API 通过内省确认令牌仍然有效</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 分清楚“服务在替自己办事”还是“服务在冒充用户”</div>
+      <p>如果一个 API 同时接受用户令牌和服务令牌，一定要能明确区分这两种调用方，否则服务可能冒充用户，或者用户拿着自己的令牌冒充了一个服务账号。OAuth2 标准本身没有规定统一的区分方式，需要查你使用的 AS 的具体文档（通常是看 <code class="inline">token_type</code>、<code class="inline">client_id</code> 或某个自定义 claim）。</p>
+    </div>
+
+    <h3 id="s2-1">服务账号：让服务也能"查得到、管得了"</h3>
+    <p>客户端凭据许可有个尴尬之处：OAuth2 客户端的信息通常存在 AS 自己的私有数据库里，API 服务器验证完令牌之后，往往不知道这个客户端具体是谁、属于哪个部门、该有什么权限，只能纯粹依赖令牌里的 scope 做决策。另一种做法是给服务建一个<strong>服务账号</strong>——像普通用户账号一样存在共享的用户目录里，可以分配角色、加入用户组，用管理用户的那套工具去管理它。服务账号通常用 Resource Owner Password Credentials（ROPC）许可来获取令牌：客户端用自己的 client_id/secret 做 Basic 认证，同时把服务账号的用户名密码作为表单参数传给 AS，最终拿到的令牌里 <code class="inline">sub</code> 就是这个服务账号。</p>
+
+    <div class="callout note">
+      <div class="title">💡 客户端凭据 vs 服务账号，怎么选</div>
+      <p>客户端凭据许可简单，但客户端信息只在 AS 内部可见，API 很难对它做精细的基于角色的访问控制；服务账号能复用现成的用户目录和权限体系，代价是客户端要同时管理两套凭据（自己的 client secret + 服务账号密码）。11.3 节会讲到，用 JWT Bearer 许可可以把这两条路径统一起来。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/RevokeAccessToken.java（节选，展示 client_secret_basic 的标准写法）</div>
+        <pre><code>var clientId = args[0];
+var clientSecret = args[1];
+
+var credentials = URLEncoder.encode(clientId, UTF_8) +
+        ":" + URLEncoder.encode(clientSecret, UTF_8);
+var authorization = "Basic " + Base64.getEncoder()
+        .encodeToString(credentials.getBytes(UTF_8));
+
+var httpClient = HttpClient.newHttpClient();
+// 把 grant_type 换成 client_credentials、URI 换成 token
+// 端点，就是 11.2 节获取访问令牌的请求
+var form = "grant_type=client_credentials&scope=create_space";
+
+var httpRequest = HttpRequest.newBuilder()
+        .uri(URI.create("https://as.example.com:8443/oauth2/access_token"))
+        .header("Content-Type",
+                "application/x-www-form-urlencoded")
+        .header("Authorization", authorization)
+        .POST(HttpRequest.BodyPublishers.ofString(form))
+        .build();
+
+var response = httpClient.send(httpRequest,
+        HttpResponse.BodyHandlers.ofString());</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">services/link_preview/client.py（教学示例，requests-oauthlib）</div>
+        <pre><code>from oauthlib.oauth2 import BackendApplicationClient
+from requests_oauthlib import OAuth2Session
+
+client_id = "test"
+client_secret = settings.NATTER_CLIENT_SECRET  # 从密钥管理读取，见 11.5 节
+
+client = BackendApplicationClient(client_id=client_id)
+oauth = OAuth2Session(client=client)
+
+token = oauth.fetch_token(
+    token_url="https://as.example.com:8443/oauth2/access_token",
+    client_id=client_id,
+    client_secret=client_secret,
+    scope=["create_space"],
+)
+# token == {"access_token": "...", "token_type": "Bearer",
+#           "expires_in": 3599, "scope": "create_space"}
+
+resp = oauth.get("https://api.natter.local/spaces")</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/services/asClient.ts（教学示例，原生 fetch）</div>
+        <pre><code>const AS_TOKEN_ENDPOINT =
+  "https://as.example.com:8443/oauth2/access_token";
+
+async function getServiceAccessToken(): Promise&lt;string&gt; {
+  const clientId = "test";
+  const clientSecret = process.env.NATTER_CLIENT_SECRET!; // 见 11.5 节
+
+  const basic = Buffer.from(`${clientId}:${clientSecret}`)
+    .toString("base64");
+
+  const res = await fetch(AS_TOKEN_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${basic}`,
+    },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      scope: "create_space",
+    }),
+  });
+
+  const { access_token } = await res.json();
+  return access_token as string;
+}</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s3"><span class="num">11.3</span>OAuth2 的 JWT Bearer 许可</h2>
+
+    <p>用 client secret 认证虽然简单，但有几个隐患：AS 往往需要保存 client secret 的明文（或者能还原出明文），一旦客户端数据库泄露，所有 secret 都跟着泄露；secret 在网络上传输，一旦通信被截获也会被偷；而且很多服务器共享同一个 secret 时很难轮换。RFC 7523 定义的 <strong>JWT Bearer 许可</strong>提供了一个更安全的替代方案：客户端不再发送一个静态密码，而是用自己控制的私钥现场签一个 JWT，当作"一次性授权书"发给 AS。</p>
+
+    <p>因为用的是公钥签名，客户端只需要把公钥交给 AS（甚至可以让 AS 定期去客户端自己发布的一个 HTTPS 地址上拉取最新公钥，即 JWK Set），私钥永远不出客户端的门。这样即使 AS 被攻破，攻击者拿到的也只是公钥，没法伪造新的签名。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 320" role="img" aria-label="JWT Bearer 客户端认证时序图">
+        <defs>
+          <marker id="a2-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a2-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+        <rect x="20" y="14" width="160" height="38" rx="8" fill="#2563eb"/>
+        <text x="100" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">服务客户端</text>
+        <rect x="430" y="14" width="160" height="38" rx="8" fill="#0891b2"/>
+        <text x="510" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">授权服务器 AS</text>
+
+        <line x1="100" y1="52" x2="100" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="510" y1="52" x2="510" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+
+        <rect x="130" y="64" width="340" height="40" rx="6" fill="none" stroke="#2563eb" stroke-dasharray="4 3"/>
+        <line x1="100" y1="84" x2="130" y2="84" class="stub"/>
+        <text x="300" y="80" text-anchor="middle" font-size="11.5" fill="#1c2333">① 用私钥 es256-key 对 JWT 签名</text>
+        <text x="300" y="94" text-anchor="middle" font-size="11" fill="#5b6478">sub=iss=client_id，aud=AS 地址，exp=+30s，jti=随机值</text>
+
+        <line x1="100" y1="140" x2="502" y2="140" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a2-1)"/>
+        <text x="305" y="122" text-anchor="middle" font-size="12" fill="#1c2333">② POST /oauth2/access_token</text>
+        <text x="305" y="134" text-anchor="middle" font-size="11.5" fill="#5b6478">client_assertion=&lt;JWT&gt;&amp;client_assertion_type=…jwt-bearer</text>
+
+        <rect x="160" y="180" width="310" height="44" rx="6" fill="none" stroke="#0891b2" stroke-dasharray="4 3"/>
+        <line x1="510" y1="202" x2="470" y2="202" class="stub"/>
+        <text x="315" y="198" text-anchor="middle" font-size="11.5" fill="#1c2333">③ AS 通过客户端注册的 JWKS 端点取公钥</text>
+        <text x="315" y="212" text-anchor="middle" font-size="11" fill="#5b6478">验证签名、aud、exp，并记录 jti 防重放</text>
+
+        <line x1="510" y1="270" x2="108" y2="270" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a2-2)"/>
+        <text x="305" y="262" text-anchor="middle" font-size="12" fill="#1c2333">④ 200 OK { access_token, scope, expires_in }</text>
+      </svg>
+      <figcaption>图 11-2：JWT Bearer 客户端认证——客户端不发送静态密码，而是用私钥现场签一份短期有效的“授权书”（assertion）</figcaption>
+    </figure>
+
+    <p>请求里要传两个新参数：<code class="inline">client_assertion</code> 就是签好名的 JWT，<code class="inline">client_assertion_type</code> 固定写 <code class="inline">urn:ietf:params:oauth:client-assertion-type:jwt-bearer</code>，告诉 AS "我发的这个 assertion 是一个 JWT"。如果用同样的思路认证一个<strong>服务账号</strong>（而不是客户端自己），语法上很像：许可类型换成 <code class="inline">urn:ietf:params:oauth:grant-type:jwt-bearer</code>，JWT 通过 <code class="inline">assertion</code> 参数（而不是 <code class="inline">client_assertion</code>）传递，<code class="inline">sub</code> 也从 client_id 换成了服务账号的用户名。这两者的安全含义不同：前者是客户端自己给自己签名（自我断言），后者是客户端在断言"我有权代表这个账号"，因为账号本人（无论是服务账号还是真实用户）并不在场确认，所以 AS 通常会对第二种情况做更严格的校验。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/JwtBearerClient.java（节选）</div>
+        <pre><code>var password = "changeit".toCharArray();
+var keyStore = KeyStore.getInstance("PKCS12");
+keyStore.load(new FileInputStream("keystore.p12"), password);
+var privateKey = (ECPrivateKey)
+        keyStore.getKey("es256-key", password);
+
+var clientId = "test";
+var as = "https://as.example.com:8080/oauth2/access_token";
+var header = new JWSHeader.Builder(JWSAlgorithm.ES256)
+        .keyID("es256-key")
+        .build();
+var claims = new JWTClaimsSet.Builder()
+        .subject(clientId)
+        .issuer(clientId)
+        .expirationTime(Date.from(now().plus(30, SECONDS)))
+        .audience(as)
+        .jwtID(UUID.randomUUID().toString())
+        .build();
+var jwt = new SignedJWT(header, claims);
+jwt.sign(new ECDSASigner(privateKey));
+var assertion = jwt.serialize();
+
+var form = "grant_type=client_credentials&scope=create_space" +
+        "&client_assertion_type=" +
+        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" +
+        "&client_assertion=" + assertion;
+
+var httpClient = HttpClient.newHttpClient();
+var request = HttpRequest.newBuilder()
+        .uri(URI.create(as))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .POST(HttpRequest.BodyPublishers.ofString(form))
+        .build();
+var response = httpClient.send(request,
+        HttpResponse.BodyHandlers.ofString());</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">services/link_preview/jwt_bearer.py（教学示例，pyjwt）</div>
+        <pre><code>import time, uuid, jwt, requests
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+with open("es256-key.pem", "rb") as f:
+    private_key = load_pem_private_key(f.read(), password=None)
+
+client_id = "test"
+as_url = "https://as.example.com:8080/oauth2/access_token"
+
+claims = {
+    "sub": client_id,
+    "iss": client_id,
+    "aud": as_url,
+    "exp": int(time.time()) + 30,
+    "jti": str(uuid.uuid4()),
+}
+assertion = jwt.encode(
+    claims, private_key, algorithm="ES256",
+    headers={"kid": "es256-key"},
+)
+
+resp = requests.post(as_url, data={
+    "grant_type": "client_credentials",
+    "scope": "create_space",
+    "client_assertion_type":
+        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    "client_assertion": assertion,
+})
+access_token = resp.json()["access_token"]
+
+# 反过来，发布公钥供 AS 拉取（jwt_bearer 视图）：
+# GET /jwks -> JsonResponse(public_jwk_set)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/services/jwtBearer.ts（教学示例，jose）</div>
+        <pre><code>import { SignJWT, importPKCS8, exportJWK } from "jose";
+import { randomUUID } from "node:crypto";
+
+const clientId = "test";
+const asUrl = "https://as.example.com:8080/oauth2/access_token";
+const privateKey = await importPKCS8(
+  process.env.ES256_PRIVATE_KEY_PEM!, "ES256",
+);
+
+const assertion = await new SignJWT({})
+  .setProtectedHeader({ alg: "ES256", kid: "es256-key" })
+  .setSubject(clientId)
+  .setIssuer(clientId)
+  .setAudience(asUrl)
+  .setExpirationTime("30s")
+  .setJti(randomUUID())
+  .sign(privateKey);
+
+const res = await fetch(asUrl, {
+  method: "POST",
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    grant_type: "client_credentials",
+    scope: "create_space",
+    client_assertion_type:
+      "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    client_assertion: assertion,
+  }),
+});
+const { access_token } = await res.json();
+
+// 反过来，Hono 发布公钥供 AS 拉取：
+// app.get("/jwks", (c) => c.json({ keys: [publicJwk] }));</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s4"><span class="num">11.4</span>双向 TLS 认证（mTLS）</h2>
+
+    <p>普通 HTTPS 连接里只有服务器出示证书证明自己的身份，客户端并不需要证明自己是谁。但 TLS 协议本身支持反过来：让服务器也向客户端要一张证书，双方都出示证书、都证明自己持有对应的私钥——这就是<strong>双向 TLS</strong>（mutual TLS，简称 mTLS）。</p>
+
+    <h3 id="s4-1">TLS 证书认证是怎么工作的</h3>
+    <p>TLS 握手大致分两步：先协商用什么算法、交换证书、（可选）互相认证，再用协商出的会话密钥加密传输数据。服务器总会发一条 <code class="inline">Certificate</code> 消息带上自己的证书链；如果服务器还想要客户端证书，就会额外发一条 <code class="inline">CertificateRequest</code> 消息。客户端收到后可以回一条自己的 <code class="inline">Certificate</code> 消息，并且——这是关键——紧跟着发一条 <code class="inline">CertificateVerify</code> 消息，用自己私钥对"这次握手到目前为止交换过的所有消息"做一个签名。这个签名把身份和"这一次具体的握手"死死绑定在一起，防止别人截获证书后拿去冒充；握手之后的会话密钥也是从这些握手数据派生出来的，所以这一次签名实际上认证了整条连接上的所有后续数据，而不仅仅是握手本身。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 340" role="img" aria-label="mTLS 双向握手示意图">
+        <defs>
+          <marker id="a3-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a3-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a3-3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a3-4a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a3-4b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+        <rect x="20" y="14" width="150" height="38" rx="8" fill="#2563eb"/>
+        <text x="95" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+        <rect x="470" y="14" width="150" height="38" rx="8" fill="#16a34a"/>
+        <text x="545" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">服务器</text>
+
+        <line x1="95" y1="52" x2="95" y2="320" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="545" y1="52" x2="545" y2="320" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="95" y1="90" x2="537" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a3-1)"/>
+        <text x="320" y="82" text-anchor="middle" font-size="12" fill="#1c2333">① ClientHello</text>
+
+        <line x1="545" y1="130" x2="103" y2="130" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a3-2)"/>
+        <text x="320" y="112" text-anchor="middle" font-size="12" fill="#1c2333">② ServerHello + Certificate（服务器证书链）</text>
+        <text x="320" y="124" text-anchor="middle" font-size="11.5" fill="#5b6478">+ CertificateRequest（要求客户端也出示证书）</text>
+
+        <rect x="20" y="140" width="150" height="36" rx="6" fill="none" stroke="#2563eb"/>
+        <text x="95" y="154" text-anchor="middle" class="badge-box" font-size="11">客户端：核对服务器证书链</text>
+        <text x="95" y="168" text-anchor="middle" class="badge-box" font-size="11">是否由受信 CA 签发 ✓</text>
+
+        <line x1="95" y1="212" x2="537" y2="212" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a3-3)"/>
+        <text x="320" y="194" text-anchor="middle" font-size="12" fill="#1c2333">③ Certificate（客户端证书）</text>
+        <text x="320" y="206" text-anchor="middle" font-size="11.5" fill="#5b6478">+ CertificateVerify（用客户端私钥签名握手记录）</text>
+
+        <rect x="470" y="222" width="150" height="36" rx="6" fill="none" stroke="#16a34a"/>
+        <text x="545" y="236" text-anchor="middle" class="badge-box" font-size="11">服务器：核对客户端证书链</text>
+        <text x="545" y="250" text-anchor="middle" class="badge-box" font-size="11">是否由受信 CA 签发 ✓</text>
+
+        <line x1="95" y1="296" x2="537" y2="296" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a3-4a)"/>
+        <line x1="537" y1="304" x2="95" y2="304" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a3-4b)"/>
+        <text x="320" y="286" text-anchor="middle" font-size="12" fill="#1c2333">④ 应用数据（对称会话密钥加密，双向已互相验证）</text>
+      </svg>
+      <figcaption>图 11-3：mTLS 双向握手——客户端验证服务器证书是老规矩，双向 TLS 多了一步：服务器反过来也要验证客户端证书</figcaption>
+    </figure>
+
+    <div class="legend">
+      <span><span class="dot" style="background:#2563eb"></span>客户端（出示证书、验证服务器证书）</span>
+      <span><span class="dot" style="background:#16a34a"></span>服务器（出示证书、验证客户端证书）</span>
+    </div>
+
+    <div class="callout note">
+      <div class="title">💡 为什么 mTLS 很少用来认证真实用户</div>
+      <p>理论上客户端证书也能用来认证浏览器用户，但管理密钥和证书对普通用户来说太麻烦，体验很差，现在基本被 WebAuthn 这类更易用的强认证方式取代了。mTLS 真正的舞台是服务与服务之间——这些"客户端"是程序，能够妥善保管私钥文件，不需要人工操作。</p>
+    </div>
+
+    <h3 id="s4-2">校验客户端身份：证书信息是怎么"透传"给应用的</h3>
+    <p>在真实部署里，TLS 握手几乎从来不是应用代码自己处理的——Spark、Django、Hono 这些 Web 框架通常运行在 HTTP 层，TLS 终止（谁来验证证书、谁来做握手）交给前面的反向代理或 Ingress 控制器（比如 NGINX、Envoy）。这一节我们给 Kubernetes 里的 NGINX Ingress 控制器加几个注解，让它要求并校验客户端证书，然后把校验结果和证书内容通过几个约定好的请求头转发给后面的应用。</p>
+
+    <pre class="plain"><code># ch11/kubernetes/natter-ingress.yaml（节选）
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "optional"
+    nginx.ingress.kubernetes.io/auth-tls-secret: "natter-api/ca-secret"
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "1"
+    nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream: "true"</code></pre>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 260" role="img" aria-label="mTLS 证书信息透传给后端服务示意图">
+        <defs>
+          <marker id="a4-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a4-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+        <rect x="20" y="14" width="130" height="38" rx="8" fill="#2563eb"/>
+        <text x="85" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+        <rect x="280" y="14" width="160" height="38" rx="8" fill="#d97706"/>
+        <text x="360" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">NGINX Ingress</text>
+        <rect x="550" y="14" width="130" height="38" rx="8" fill="#16a34a"/>
+        <text x="615" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">后端服务</text>
+
+        <line x1="85" y1="52" x2="85" y2="240" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="360" y1="52" x2="360" y2="240" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="615" y1="52" x2="615" y2="240" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="85" y1="90" x2="352" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a4-1)"/>
+        <text x="220" y="72" text-anchor="middle" font-size="12" fill="#1c2333">① TLS 握手 + 客户端证书</text>
+        <text x="220" y="84" text-anchor="middle" font-size="11.5" fill="#5b6478">（mTLS，双向认证）</text>
+
+        <rect x="280" y="100" width="160" height="40" rx="6" fill="none" stroke="#d97706" stroke-dasharray="4 3"/>
+        <text x="360" y="115" text-anchor="middle" class="badge-box" font-size="11">② 校验证书链是否由</text>
+        <text x="360" y="129" text-anchor="middle" class="badge-box" font-size="11">受信 CA 签发、是否过期</text>
+
+        <line x1="360" y1="180" x2="607" y2="180" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a4-2)"/>
+        <text x="490" y="152" text-anchor="middle" font-size="12" fill="#1c2333">③ 普通 HTTP 请求 + headers：</text>
+        <text x="490" y="164" text-anchor="middle" font-size="11.5" fill="#5b6478">ssl-client-verify: SUCCESS</text>
+        <text x="490" y="176" text-anchor="middle" font-size="11.5" fill="#5b6478">ssl-client-cert: &lt;URL 编码 PEM&gt;</text>
+
+        <rect x="540" y="190" width="150" height="40" rx="6" fill="none" stroke="#16a34a" stroke-dasharray="4 3"/>
+        <text x="615" y="205" text-anchor="middle" class="badge-box" font-size="11">④ 解析 PEM，提取 SAN 中的</text>
+        <text x="615" y="219" text-anchor="middle" class="badge-box" font-size="11">DNS 条目作为客户端身份</text>
+      </svg>
+      <figcaption>图 11-4：Ingress 终止 TLS 握手并校验客户端证书，再把结果通过 <code class="inline">ssl-client-verify</code> / <code class="inline">ssl-client-cert</code> 头转发给后端应用</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>请求头</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><code class="inline">ssl-client-verify</code></td><td><code class="inline">NONE</code> 没提供证书 / <code class="inline">SUCCESS</code> 证书有效 / <code class="inline">FAILURE:&lt;原因&gt;</code></td></tr>
+        <tr><td><code class="inline">ssl-client-subject-dn</code></td><td>证书的 Subject DN 字段</td></tr>
+        <tr><td><code class="inline">ssl-client-issuer-dn</code></td><td>颁发者 DN（应等于 CA 证书的 Subject DN）</td></tr>
+        <tr><td><code class="inline">ssl-client-cert</code></td><td>URL 编码的完整 PEM 证书（需要开启 <code class="inline">auth-tls-pass-certificate-to-upstream</code>）</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout danger">
+      <div class="title">🚨 一定要确认网关会剥离外部传入的这些头</div>
+      <p>如果客户端自己在请求里带上 <code class="inline">ssl-client-verify: SUCCESS</code> 这个头，而网关没有无条件覆盖/剥离它，那攻击者不需要任何证书就能伪装成已认证的客户端。这是本章最容易被忽视、也最致命的一个配置错误。可以进一步把头名字加上随机后缀（比如 <code class="inline">ssl-client-cert-zOAGY18FHb</code>），降低网关配置疏漏时被猜中头名的风险。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/controller/UserController.java（节选）</div>
+        <pre><code>private static final int DNS_TYPE = 2;
+
+public void authenticate(Request request, Response response) {
+    if ("SUCCESS".equals(request.headers("ssl-client-verify"))) {
+        processClientCertificateAuth(request);
+        return;
+    }
+    var credentials = getCredentials(request);
+    // ...否则回退到用户名/密码认证
+}
+
+void processClientCertificateAuth(Request request) {
+    var pem = request.headers("ssl-client-cert");
+    var cert = decodeCert(pem);
+    try {
+        if (cert.getSubjectAlternativeNames() == null) return;
+        for (var san : cert.getSubjectAlternativeNames()) {
+            if ((Integer) san.get(0) == DNS_TYPE) {
+                var subject = (String) san.get(1);
+                request.attribute("subject", subject);
+                return;
+            }
+        }
+    } catch (CertificateParsingException e) {
+        throw new RuntimeException(e);
+    }
+}
+
+public static X509Certificate decodeCert(String encodedCert) {
+    var pem = URLDecoder.decode(encodedCert, UTF_8);
+    try (var in = new ByteArrayInputStream(pem.getBytes(UTF_8))) {
+        var certFactory = CertificateFactory.getInstance("X.509");
+        return (X509Certificate) certFactory.generateCertificate(in);
+    } catch (Exception e) {
+        throw new RuntimeException(e);
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">natter/middleware.py（教学示例，cryptography）</div>
+        <pre><code>from cryptography import x509
+from urllib.parse import unquote
+
+class ClientCertAuthMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.META.get("HTTP_SSL_CLIENT_VERIFY") == "SUCCESS":
+            self._process_client_cert(request)
+        return self.get_response(request)
+
+    def _process_client_cert(self, request):
+        pem = unquote(request.META["HTTP_SSL_CLIENT_CERT"])
+        cert = x509.load_pem_x509_certificate(pem.encode())
+        try:
+            san = cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName)
+        except x509.ExtensionNotFound:
+            return
+        dns_names = san.value.get_values_for_type(x509.DNSName)
+        if dns_names:
+            request.subject = dns_names[0]  # 供后续视图使用</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/clientCertAuth.ts（教学示例，@peculiar/x509）</div>
+        <pre><code>import { X509Certificate } from "@peculiar/x509";
+import type { MiddlewareHandler } from "hono";
+
+export const clientCertAuth: MiddlewareHandler = async (c, next) => {
+  if (c.req.header("ssl-client-verify") === "SUCCESS") {
+    const pem = decodeURIComponent(c.req.header("ssl-client-cert") ?? "");
+    const cert = new X509Certificate(pem);
+    const dnsNames = cert.getExtension("2.5.29.17") // SAN
+      ? cert.subjectAltName?.filter((n) => n.type === "dns")
+      : [];
+    if (dnsNames && dnsNames.length > 0) {
+      c.set("subject", dnsNames[0].value);
+    }
+  }
+  await next();
+};</code></pre>
+      </div>
+    </div>
+
+    <div class="callout note">
+      <div class="title">💡 用 service mesh 自动管理证书</div>
+      <p>Istio 这类 service mesh 会在每个服务旁边挂一个 sidecar 代理，自动给网格内部的所有服务颁发、轮换 mTLS 证书，服务本身完全不用管证书的生成和更新。它把证书信息合并进一个 <code class="inline">X-Forwarded-Client-Cert</code> 头（用 <code class="inline">By</code>/<code class="inline">Hash</code>/<code class="inline">Subject</code>/<code class="inline">URI</code>/<code class="inline">DNS</code> 等字段区分），身份通常用 SPIFFE 格式的 URI 表示，例如 <code class="inline">spiffe://k8s.example.com/ns/natter-api/sa/natter-db</code>，由信任域、命名空间和服务账号组成。请求经过多层 sidecar 时，新的证书信息会追加而不是覆盖已有的头，这样多跳链路上每一跳的身份都留有记录。</p>
+    </div>
+
+    <h3 id="s4-3">mTLS 结合 OAuth2：证书绑定的访问令牌</h3>
+    <p>RFC 8705 把 mTLS 和 OAuth2 结合了起来，一是可以用客户端证书替代 client secret 向令牌端点认证；二是更有意思的一点——AS 可以把签发出去的访问令牌和这次认证用的证书"绑定"在一起，得到<strong>证书绑定的访问令牌</strong>（certificate-bound access token）。别人就算偷到这个令牌，如果没有对应的私钥，在 mTLS 连接上也用不了它，令牌不再是一个纯粹"谁拿到谁能用"的 bearer token。</p>
+
+    <p>具体做法是：AS 在签发令牌时对客户端证书算一个 SHA-256 指纹，通过内省响应（或者 JWT 里）的 <code class="inline">cnf</code>（confirmation key）claim 带出来，格式是 <code class="inline">{ "x5t#S256": "…哈希…" }</code>。API 拿到内省结果后，把这个哈希和当前这条 mTLS 连接里客户端出示的证书重新算一遍哈希做比较，只有两者一致才认为令牌有效。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/token/OAuth2TokenStore.java（节选）</div>
+        <pre><code>private Optional&lt;Token&gt; processResponse(JSONObject response,
+        Request originalRequest) {
+    var expiry = Instant.ofEpochSecond(response.getLong("exp"));
+    var subject = response.getString("sub");
+
+    var confirmationKey = response.optJSONObject("cnf");
+    if (confirmationKey != null) {
+        for (var method : confirmationKey.keySet()) {
+            if (!"x5t#S256".equals(method)) {
+                throw new RuntimeException(
+                        "Unknown confirmation method: " + method);
+            }
+            if (!"SUCCESS".equals(
+                    originalRequest.headers("ssl-client-verify"))) {
+                return Optional.empty();
+            }
+            var expectedHash = Base64url.decode(
+                    confirmationKey.getString(method));
+            var cert = UserController.decodeCert(
+                    originalRequest.headers("ssl-client-cert"));
+            var certHash = thumbprint(cert);
+            if (!MessageDigest.isEqual(expectedHash, certHash)) {
+                return Optional.empty();
+            }
+        }
+    }
+    var token = new Token(expiry, subject);
+    token.attributes.put("scope", response.getString("scope"));
+    return Optional.of(token);
+}
+
+private byte[] thumbprint(X509Certificate certificate) {
+    var sha256 = MessageDigest.getInstance("SHA-256");
+    return sha256.digest(certificate.getEncoded());
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">natter/tokens.py（教学示例，cryptography + hashlib）</div>
+        <pre><code>import hashlib, base64
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding
+from urllib.parse import unquote
+
+def validate_cnf_binding(introspection: dict, request) -> bool:
+    cnf = introspection.get("cnf")
+    if not cnf:
+        return True  # 令牌未绑定证书
+
+    if "x5t#S256" not in cnf:
+        raise ValueError(f"unsupported confirmation method: {cnf.keys()}")
+
+    if request.META.get("HTTP_SSL_CLIENT_VERIFY") != "SUCCESS":
+        return False
+
+    expected = base64.urlsafe_b64decode(cnf["x5t#S256"] + "==")
+    pem = unquote(request.META["HTTP_SSL_CLIENT_CERT"])
+    cert = x509.load_pem_x509_certificate(pem.encode())
+    actual = hashlib.sha256(cert.public_bytes(Encoding.DER)).digest()
+
+    return hashlib.compare_digest(expected, actual)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/services/certBinding.ts（教学示例，Web Crypto）</div>
+        <pre><code>import { X509Certificate } from "@peculiar/x509";
+
+function base64urlToBytes(b64url: string): Uint8Array {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+export async function validateCnfBinding(
+  introspection: { cnf?: Record&lt;string, string&gt; },
+  sslClientVerify: string | undefined,
+  sslClientCertPem: string | undefined,
+): Promise&lt;boolean&gt; {
+  const cnf = introspection.cnf;
+  if (!cnf) return true;
+
+  const expected = cnf["x5t#S256"];
+  if (!expected) throw new Error("unsupported confirmation method");
+  if (sslClientVerify !== "SUCCESS") return false;
+
+  const cert = new X509Certificate(decodeURIComponent(sslClientCertPem!));
+  const digest = await crypto.subtle.digest("SHA-256", cert.rawData);
+  const actualB64url = btoa(
+    String.fromCharCode(...new Uint8Array(digest)),
+  ).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  return actualB64url === expected;
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ Proof-of-possession（持有证明）令牌</div>
+      <p>证书绑定令牌是"持有证明"（PoP，也叫 holder-of-key）令牌的一种。这类令牌不再是"谁拿到谁能用"，而是"拿到令牌 + 证明你持有对应私钥"才能用。DPoP 是另一种基于 JWT、不依赖 PKI 的 PoP 方案，思路类似但更轻量，也值得关注。</p>
+    </div>
+
+    <h2 id="s5"><span class="num">11.5</span>管理服务凭据</h2>
+    <p>无论用哪种认证方式，客户端总得先拿到点什么——client secret、私钥，或者证书。怎么把这些凭据安全地分发给服务、定期轮换、在服务下线时收回，这一整套流程叫<strong>密钥管理</strong>（凭据是加密密钥时）或更广义的<strong>密钥/凭据管理</strong>（secrets management）。</p>
+
+    <h3 id="s5-1">Kubernetes Secret</h3>
+    <p>Kubernetes 自带一种叫 <strong>Secret</strong> 的资源，专门存放这类敏感配置。它和 Pod、Service 一样有名字、有命名空间，值以 Base64 编码存储（注意：Base64 只是编码，不是加密，千万不要把 Secret 的 YAML 直接提交到代码仓库）。可以把 Secret 以文件的形式挂载进容器（推荐），也可以作为环境变量注入（不推荐——容易通过 <code class="inline">kubectl describe pod</code> 泄露，也不支持二进制内容）。</p>
+
+    <pre class="plain"><code># 精简版 Kubernetes Secret 示例
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-password
+  namespace: natter-api
+type: Opaque
+data:
+  username: bmF0dGVy      # base64("natter")
+  password: cGFzc3dvcmQ=  # base64("password")
+---
+# 挂载到 Pod（natter-api-deployment.yaml 节选）
+volumeMounts:
+  - name: db-password
+    mountPath: "/etc/secrets/database"
+    readOnly: true
+volumes:
+  - name: db-password
+    secret:
+      secretName: db-password</code></pre>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/Main.java（节选）</div>
+        <pre><code>var secretsPath = Paths.get("/etc/secrets/database");
+var dbUsername = Files.readString(secretsPath.resolve("username"));
+var dbPassword = Files.readString(secretsPath.resolve("password"));
+
+var jdbcUrl =
+    "jdbc:h2:tcp://natter-database-service:9092/mem:natter";
+var datasource = JdbcConnectionPool.create(
+        jdbcUrl, dbUsername, dbPassword);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">natter/settings.py（教学示例）</div>
+        <pre><code>import os
+from pathlib import Path
+
+SECRETS_DIR = Path("/etc/secrets/database")
+
+def _read_secret(name: str, env_fallback: str) -> str:
+    secret_file = SECRETS_DIR / name
+    if secret_file.exists():
+        return secret_file.read_text().strip()
+    return os.environ[env_fallback]  # 本地开发时的兜底
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "USER": _read_secret("username", "DB_USERNAME"),
+        "PASSWORD": _read_secret("password", "DB_PASSWORD"),
+        "HOST": "natter-database-service",
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/config/secrets.ts（教学示例）</div>
+        <pre><code>import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+const SECRETS_DIR = "/etc/secrets/database";
+
+function readSecret(name: string, envFallback: string): string {
+  const path = join(SECRETS_DIR, name);
+  if (existsSync(path)) {
+    return readFileSync(path, "utf-8").trim();
+  }
+  return process.env[envFallback]!; // 本地开发兜底
+}
+
+export const dbConfig = {
+  username: readSecret("username", "DB_USERNAME"),
+  password: readSecret("password", "DB_PASSWORD"),
+  host: "natter-database-service",
+};</code></pre>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="title">⚠️ Kubernetes Secret 不是万能保险箱</div>
+      <p>Secret 默认存在 Kubernetes 内部的 etcd 数据库里且不加密（需要额外开启，并且优先选 <code class="inline">kms</code> 加密模式，而不是文档列出的 <code class="inline">aescbc</code>，后者是无认证加密，可能被 padding oracle 攻击）。任何能在该命名空间创建 Pod 的人，理论上都能读到这个命名空间下的所有 Secret；有节点 root 权限的管理员能读到所有 Secret。所以 Secret 提供的是"和源码分离"的隔离，而不是绝对安全的保险箱。</p>
+    </div>
+
+    <h3 id="s5-2">密钥/凭据管理服务与 KMS</h3>
+    <p>更进一步的做法是用专门的<strong>密钥管理服务</strong>（如 HashiCorp Vault）或云厂商的 <strong>KMS</strong>（Key Management Service）。它们的存储默认加密，能按需自动生成、自动轮换凭据（比如 Vault 能现场生成一个几小时后自动失效的数据库账号），能做细粒度的访问控制，还能把每一次读取都记入审计日志。KMS 更进一步：应用不直接拿到密钥本身，而是把"用这个密钥签名/加密"这个操作发给 KMS 执行，密钥永远不出 KMS 的门。为了避免每次加解密都要走一次网络请求，通常配合<strong>信封加密</strong>（envelope encryption）：本地生成一个数据加密密钥（DEK）加密数据，DEK 本身再用 KMS 里的密钥加密（成为"密钥加密密钥" KEK）后随数据一起保存。</p>
+
+    <h3 id="s5-3">避免长期密钥落盘</h3>
+    <p>即便用了 KMS，应用启动时依然要有一个初始凭据去访问 KMS，这个初始凭据本身也需要保护。一种做法是让一个独立的控制器进程监听 Kubernetes API，一旦发现有新 Pod 创建，就用自己持有的私钥现场签一个只在极短时间内有效的 JWT，注入到新 Pod 里；Pod 启动后立刻用这个 JWT 走 11.3 节的 JWT Bearer 许可换成正式的访问令牌（或者其他长期凭据）。这样一来，签名私钥本身永远不会分发到业务 Pod 里，即便某个业务 Pod 被攻破，攻击者最多偷到一个已经快过期、且已经被消费掉的一次性令牌。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 260" role="img" aria-label="控制器分发短期 JWT 给新 Pod 的架构图">
+        <defs>
+          <marker id="a5-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a5-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a5-3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+        <rect x="20" y="30" width="140" height="44" rx="8" fill="#7c3aed"/>
+        <text x="90" y="48" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Kubernetes</text>
+        <text x="90" y="63" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">API server</text>
+
+        <rect x="280" y="30" width="140" height="44" rx="8" fill="#d97706"/>
+        <text x="350" y="57" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">控制器</text>
+
+        <rect x="540" y="30" width="140" height="44" rx="8" fill="#0891b2"/>
+        <text x="610" y="57" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">AS</text>
+
+        <rect x="280" y="180" width="140" height="44" rx="8" fill="#16a34a"/>
+        <text x="350" y="207" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">新 Pod</text>
+
+        <line x1="160" y1="52" x2="272" y2="52" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a5-1)"/>
+        <text x="216" y="42" text-anchor="middle" font-size="11.5" fill="#1c2333">① 通知“有新 Pod 创建”</text>
+
+        <line x1="350" y1="74" x2="350" y2="176" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a5-2)"/>
+        <text x="440" y="128" text-anchor="middle" font-size="11.5" fill="#1c2333">② 控制器用私钥签一个</text>
+        <text x="440" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">短期 JWT，注入新 Pod</text>
+
+        <line x1="420" y1="196" x2="533" y2="70" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a5-3)"/>
+        <text x="500" y="150" text-anchor="middle" font-size="11.5" fill="#1c2333">③ Pod 用 JWT Bearer</text>
+        <text x="500" y="164" text-anchor="middle" font-size="11.5" fill="#1c2333">许可换正式访问令牌</text>
+      </svg>
+      <figcaption>图 11-5：控制器持有签名私钥并驻留在独立的控制面命名空间，业务 Pod 只拿到一次性、短期有效的 JWT</figcaption>
+    </figure>
+
+    <h3 id="s5-4">密钥派生：从一把主密钥变出很多把密钥</h3>
+    <p>另一个减少需要分发的密钥数量的思路，是用<strong>密钥派生函数</strong>（KDF）：给定一把主密钥和一个"用途"字符串（context），派生出一把新密钥；不同的 context 派生出完全不同、且互相之间看起来毫无关联的密钥。<strong>HKDF</strong>（HMAC-based KDF）是最常用的实现，本质上就是循环调用 HMAC，把"上一轮的输出 + context 字符串 + 轮次编号"作为下一轮 HMAC 的输入，直到凑够所需的密钥长度。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 260" role="img" aria-label="HKDF 密钥派生示意图">
+        <defs>
+          <marker id="a6-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a6-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a6-3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a6-4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+        <rect x="20" y="90" width="140" height="50" rx="8" fill="#7c3aed"/>
+        <text x="90" y="112" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">主密钥</text>
+        <text x="90" y="128" text-anchor="middle" fill="#fff" font-size="11">hmac-key</text>
+
+        <rect x="250" y="90" width="140" height="50" rx="8" fill="#16a34a"/>
+        <text x="320" y="120" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">HKDF-Expand</text>
+
+        <line x1="160" y1="115" x2="242" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-1)"/>
+
+        <rect x="470" y="20" width="150" height="40" rx="6" fill="#7c3aed"/>
+        <text x="545" y="35" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">AES 令牌加密密钥</text>
+        <text x="545" y="49" text-anchor="middle" fill="#fff" font-size="10.5">32 字节</text>
+
+        <rect x="470" y="95" width="150" height="40" rx="6" fill="#7c3aed"/>
+        <text x="545" y="110" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">Ed25519 签名种子</text>
+        <text x="545" y="124" text-anchor="middle" fill="#fff" font-size="10.5">32 字节</text>
+
+        <rect x="470" y="170" width="150" height="40" rx="6" fill="#7c3aed"/>
+        <text x="545" y="185" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">其他自定义密钥</text>
+        <text x="545" y="199" text-anchor="middle" fill="#fff" font-size="10.5">按需长度</text>
+
+        <line x1="390" y1="105" x2="462" y2="40" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-2)"/>
+        <text x="430" y="70" text-anchor="middle" font-size="10.5" fill="#5b6478">"token-encryption-key"</text>
+
+        <line x1="390" y1="115" x2="462" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-3)"/>
+        <text x="430" y="150" text-anchor="middle" font-size="10.5" fill="#5b6478">"nacl-signing-key-seed"</text>
+
+        <line x1="390" y1="125" x2="462" y2="190" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-4)"/>
+        <text x="430" y="225" text-anchor="middle" font-size="10.5" fill="#5b6478">"&lt;自定义 context&gt;"</text>
+      </svg>
+      <figcaption>图 11-6：同一把主密钥，配上不同的 context 字符串，可以派生出任意多把互相独立、不可逆推的密钥</figcaption>
+    </figure>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/HKDF.java（全文）+ Main.java（用法节选）</div>
+        <pre><code>public class HKDF {
+    public static Key expand(Key masterKey, String context,
+                             int outputKeySize, String algorithm)
+            throws GeneralSecurityException {
+        checkIndex(outputKeySize, 255*32);
+        var hmac = Mac.getInstance("HmacSHA256");
+        hmac.init(masterKey);
+
+        var output = new byte[outputKeySize];
+        var block = new byte[0];
+        for (int i = 0; i < outputKeySize; i += 32) {
+            hmac.update(block);
+            hmac.update(context.getBytes(UTF_8));
+            hmac.update((byte) ((i / 32) + 1));
+            block = hmac.doFinal();
+            System.arraycopy(block, 0, output, i,
+                    Math.min(outputKeySize - i, 32));
+        }
+        return new SecretKeySpec(output, algorithm);
+    }
+}
+
+// Main.java 里的用法：
+var encKey = HKDF.expand(macKey, "token-encryption-key", 32, "AES");
+var seed = HKDF.expand(macKey, "nacl-signing-key-seed", 32, "NaCl");</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">natter/crypto.py（教学示例，cryptography.hazmat）</div>
+        <pre><code>from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+
+def derive_key(master_key: bytes, context: str,
+                output_size: int = 32) -> bytes:
+    hkdf = HKDFExpand(
+        algorithm=hashes.SHA256(),
+        length=output_size,
+        info=context.encode(),
+    )
+    return hkdf.derive(master_key)
+
+enc_key = derive_key(master_key, "token-encryption-key", 32)
+signing_seed = derive_key(master_key, "nacl-signing-key-seed", 32)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/crypto/hkdf.ts（教学示例，Node crypto）</div>
+        <pre><code>import { hkdfSync } from "node:crypto";
+
+function deriveKey(
+  masterKey: Buffer, context: string, outputSize = 32,
+): Buffer {
+  const derived = hkdfSync(
+    "sha256", masterKey, Buffer.alloc(0),
+    Buffer.from(context), outputSize,
+  );
+  return Buffer.from(derived);
+}
+
+const encKey = deriveKey(masterKey, "token-encryption-key", 32);
+const signingSeed = deriveKey(masterKey, "nacl-signing-key-seed", 32);</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s6"><span class="num">11.6</span>响应用户请求时的服务间调用</h2>
+
+    <p>当一个前端服务代表用户去调用后端服务，但用的是自己的服务凭据而不是用户的令牌时，就打开了一扇"混淆代理人"（confused deputy）攻击的大门——如果后端只信任"是谁调用了我"而不管"这次调用是为了哪个用户"，一个被攻破的前端服务就能冒充任何用户去操作后端。</p>
+
+    <div class="callout danger">
+      <div class="title">🚨 真实案例：Kubernetes API server 的混淆代理人漏洞</div>
+      <p>2018 年 Kubernetes 项目自己爆出过一个严重漏洞：用户向 API server 发起一个请求，API server 校验通过后，用自己高权限的服务账号凭据去连接后端服务处理请求；攻击者可以诱使这条连接"保持打开"，然后用它直接向后端服务发送任意命令，相当于借用了 API server 的管理员权限。更糟的是，Kubernetes 的审计日志默认会过滤掉系统账号的操作记录，攻击几乎不留痕迹。</p>
+    </div>
+
+    <p>最直接的防护思路，是让前端把发起请求的用户身份也一并带给后端，后端据此做访问控制决策，而不是只看"是哪个服务在调用我"。但如果只是简单地传一个用户名字段，一个被攻破的前端可以随便填别人的用户名——所以更严谨的做法是把用户原始的令牌本身传下去。这又带来新问题：如果访问令牌需要内省才能校验，那链路上每一跳都要多打一次到 AS 的网络请求，拖慢整条链路；而且如果服务被攻破，攻击者能拿着用户的令牌去别处冒充用户。</p>
+
+    <h3 id="s6-1">幻影令牌模式（Phantom Token Pattern）</h3>
+    <p>一个折中方案是<strong>幻影令牌模式</strong>：外部客户端拿的还是一枚长期有效、不透明（opaque）的访问令牌；请求先到 API 网关，网关向 AS 做一次内省，确认令牌确实有效、没被吊销，然后<strong>用自己的私钥现签一枚极短有效期的 JWT</strong>（内容取自内省结果，可能再补充一些角色/用户组信息），拿这枚"替身"JWT 去调用后面真正的微服务，原始的长期令牌到网关这一层就"消失"了。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 400" role="img" aria-label="幻影令牌模式架构图">
+        <defs>
+          <marker id="a7-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a7-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a7-3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a7-4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+          <marker id="a7-5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
+        </defs>
+
+        <rect x="20" y="180" width="130" height="44" rx="8" fill="#2563eb"/>
+        <text x="85" y="207" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">外部客户端</text>
+
+        <rect x="290" y="180" width="150" height="44" rx="8" fill="#d97706"/>
+        <text x="365" y="207" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">API 网关</text>
+
+        <rect x="290" y="20" width="150" height="44" rx="8" fill="#0891b2"/>
+        <text x="365" y="47" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">AS</text>
+
+        <rect x="560" y="80" width="140" height="44" rx="8" fill="#16a34a"/>
+        <text x="630" y="107" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">微服务 A</text>
+
+        <rect x="560" y="280" width="140" height="44" rx="8" fill="#16a34a"/>
+        <text x="630" y="307" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">微服务 B</text>
+
+        <line x1="150" y1="202" x2="282" y2="202" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a7-1)"/>
+        <text x="216" y="190" text-anchor="middle" font-size="11.5" fill="#1c2333">① opaque access_token</text>
+
+        <line x1="350" y1="180" x2="350" y2="68" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a7-2)"/>
+        <text x="238" y="128" text-anchor="middle" font-size="11.5" fill="#1c2333">② POST</text>
+        <text x="238" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">/introspect</text>
+
+        <line x1="380" y1="68" x2="380" y2="180" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a7-3)"/>
+        <text x="470" y="118" text-anchor="middle" font-size="11.5" fill="#1c2333">③ { active:true,</text>
+        <text x="470" y="132" text-anchor="middle" font-size="11.5" fill="#1c2333">scope, sub:"alice" }</text>
+
+        <line x1="440" y1="192" x2="558" y2="112" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a7-4)"/>
+        <text x="520" y="150" text-anchor="middle" font-size="11.5" fill="#1c2333">④ 短期 JWT</text>
+        <text x="520" y="164" text-anchor="middle" font-size="11.5" fill="#1c2333">(aud=微服务A)</text>
+
+        <line x1="440" y1="212" x2="558" y2="290" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a7-5)"/>
+        <text x="520" y="248" text-anchor="middle" font-size="11.5" fill="#1c2333">⑤ 短期 JWT</text>
+        <text x="520" y="262" text-anchor="middle" font-size="11.5" fill="#1c2333">(aud=微服务B)</text>
+      </svg>
+      <figcaption>图 11-7：幻影令牌模式——网关做一次内省，把外部长期不透明令牌换成短期签名 JWT，微服务只需验证签名，不用再打网络请求</figcaption>
+    </figure>
+
+    <p>好处很明显：微服务不用再各自去内省，短期 JWT 也不用担心撤销问题（反正几秒到几分钟就过期了）；网关还可以按每个下游服务的实际需要收窄 scope 和 audience，即使某个微服务被攻破，泄露出去的 JWT 也用不了太久、用不到别的服务上。</p>
+
+    <div class="callout tip">
+      <div class="title">✅ 一条经验法则</div>
+      <p>跨越信任边界（外部客户端 ↔ 你的系统）时，优先用不透明令牌 + 内省，方便及时撤销；在同一个信任边界内部（网关 ↔ 自己的微服务）传递身份时，用短期自包含令牌（JWT），换取更好的性能和更简单的验证逻辑。幻影令牌模式正是这条经验法则的标准实践。</p>
+    </div>
+
+    <p>Natter 项目本身没有实现一个独立的 API 网关，但它内部处理令牌的两步——<code class="inline">TokenController.validateToken</code> 读取 <code class="inline">Authorization: Bearer</code> 头，<code class="inline">OAuth2TokenStore.read</code> 向 AS 发起内省请求——正是幻影令牌模式里"网关侧"要做的核心动作。下面用 Java 侧展示这部分真实代码，Python/TypeScript 侧则展示幻影令牌模式里"下游微服务"的角色：不再自己内省，只需要用中间件校验网关签发的内部短期 JWT。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch11/.../controller/TokenController.java + token/OAuth2TokenStore.java（节选，网关/边缘服务的内省角色）</div>
+        <pre><code>// TokenController.java
+public void validateToken(Request request, Response response) {
+    var tokenId = request.headers("Authorization");
+    if (tokenId == null || !tokenId.startsWith("Bearer ")) return;
+    tokenId = tokenId.substring(7);
+
+    tokenStore.read(request, tokenId).ifPresent(token -> {
+        if (now().isBefore(token.expiry)) {
+            request.attribute("subject", token.username);
+            token.attributes.forEach(request::attribute);
+        } else {
+            halt(401);
+        }
+    });
+}
+
+// OAuth2TokenStore.java：向 AS 发起内省请求
+var form = "token=" + URLEncoder.encode(tokenId, UTF_8) +
+        "&token_type_hint=access_token";
+var httpRequest = HttpRequest.newBuilder()
+        .uri(introspectionEndpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Authorization", authorization)  // 网关自身的凭据
+        .POST(BodyPublishers.ofString(form))
+        .build();
+var httpResponse = httpClient.send(httpRequest,
+        BodyHandlers.ofString());
+// httpResponse.body() 里的 active/scope/sub 就是图 11-7 里的 ③</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">natter/middleware.py（教学示例，下游微服务信任网关签发的内部 JWT）</div>
+        <pre><code>import jwt
+from django.http import JsonResponse
+
+GATEWAY_PUBLIC_KEY = settings.GATEWAY_JWT_PUBLIC_KEY  # 网关公钥
+GATEWAY_AUDIENCE = "https://microservice-a.natter.internal"
+
+class GatewayJwtAuthMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        auth = request.META.get("HTTP_AUTHORIZATION", "")
+        if not auth.startswith("Bearer "):
+            return JsonResponse({"error": "missing token"}, status=401)
+        try:
+            claims = jwt.decode(
+                auth[7:], GATEWAY_PUBLIC_KEY, algorithms=["ES256"],
+                audience=GATEWAY_AUDIENCE,
+            )
+        except jwt.InvalidTokenError:
+            return JsonResponse({"error": "invalid_token"}, status=401)
+
+        request.subject = claims["sub"]     # 原始用户
+        request.scope = claims.get("scope", "")
+        return self.get_response(request)   # 无需再打内省请求</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/gatewayJwt.ts（教学示例，下游微服务）</div>
+        <pre><code>import { jwt } from "hono/jwt";
+import { verify } from "hono/jwt";
+import type { MiddlewareHandler } from "hono";
+
+const GATEWAY_PUBLIC_KEY = process.env.GATEWAY_JWT_PUBLIC_KEY!;
+const GATEWAY_AUDIENCE = "https://microservice-a.natter.internal";
+
+export const gatewayAuth: MiddlewareHandler = async (c, next) => {
+  const auth = c.req.header("Authorization");
+  if (!auth?.startsWith("Bearer ")) {
+    return c.json({ error: "missing token" }, 401);
+  }
+  try {
+    const claims = await verify(auth.slice(7), GATEWAY_PUBLIC_KEY, "ES256");
+    if (claims.aud !== GATEWAY_AUDIENCE) throw new Error("bad audience");
+    c.set("subject", claims.sub);   // 原始用户
+    c.set("scope", claims.scope);
+  } catch {
+    return c.json({ error: "invalid_token" }, 401);
+  }
+  await next(); // 无需再打内省请求
+};</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s6-2">OAuth2 Token Exchange</h3>
+    <p>幻影令牌模式很高效，但它假设网关和微服务在同一个信任边界内。如果服务调用要跨越更强的信任边界（比如医疗系统里多家医院之间转诊，逐级授权访问同一份病历），标准化程度更高的方案是 <strong>OAuth2 Token Exchange</strong>（RFC 8693）：客户端向 AS 的令牌端点发起请求，<code class="inline">grant_type</code> 是 <code class="inline">urn:ietf:params:oauth:grant-type:token-exchange</code>，把用户原始令牌作为 <code class="inline">subject_token</code> 参数带上，AS 校验后返回一枚新令牌，通常还会在里面加一个 <code class="inline">act</code>（actor）claim，写明"这次操作是谁代表谁做的"。</p>
+
+    <pre class="plain"><code>{
+  "sub": "alice@example.com",
+  "act": {
+    "sub": "https://service16.example.com",
+    "act": { "sub": "https://service77.example.com" }
+  }
+}
+// 读法：alice 的请求先经过 service77，又被 service16 代理，
+// 都不是"套娃式假扮"，而是像面具一样一层层标明"谁替谁办事"。</code></pre>
+
+    <p>Token Exchange 每一跳都要多一次到 AS 的网络请求，比幻影令牌模式更慢，但换来了标准化的委托语义和完整的审计链路，更适合跨组织、对延迟不敏感、但对可追溯性要求很高的场景。</p>
+
+    <div class="callout note">
+      <div class="title">💡 另一种思路：宏令牌（Macaroon）</div>
+      <p>如果你只是想在调用别的服务前收窄权限（而不需要完整的委托语义），第 9 章讲过的宏令牌（macaroon）是个更轻量的选择：任何拿到宏令牌的一方都可以在本地追加 caveat（比如"只能读最近 24 小时的记录"）后再往下传，全程不用请求 AS。缺点是目前支持宏令牌的数据库和网关还很少。</p>
+    </div>
+
+    <h2 id="s7">本章小结</h2>
+
+    <table>
+      <thead><tr><th>机制</th><th>适用场景</th><th>关键点</th></tr></thead>
+      <tbody>
+        <tr><td>API Key / JWT Bearer</td><td>简单的服务对服务调用</td><td>本质是长期 bearer token，务必设置合理过期时间和 audience</td></tr>
+        <tr><td>OAuth2 客户端凭据许可</td><td>纯服务对服务，复用现有 OAuth2 部署</td><td>client_secret_basic 简单但要求 AS 能还原明文密码</td></tr>
+        <tr><td>服务账号</td><td>希望服务像用户一样被统一管理权限</td><td>存在共享用户目录里，可复用角色/组的访问控制</td></tr>
+        <tr><td>OAuth2 JWT Bearer 许可</td><td>不想在网络上传静态密码</td><td>客户端自签 assertion，AS 通过 JWKS 端点验证公钥</td></tr>
+        <tr><td>mTLS</td><td>服务网格 / 高安全要求的内部通信</td><td>握手期间双向验证证书，注意剥离伪造的透传头</td></tr>
+        <tr><td>证书绑定的访问令牌</td><td>希望令牌不再是纯 bearer token</td><td>比对 <code class="inline">cnf.x5t#S256</code> 与当前 mTLS 连接证书指纹</td></tr>
+        <tr><td>Kubernetes Secret / KMS</td><td>凭据的存储与分发</td><td>优先文件挂载而非环境变量；敏感场景上 KMS / 短期令牌</td></tr>
+        <tr><td>HKDF 密钥派生</td><td>减少需要管理和分发的密钥数量</td><td>同一主密钥 + 不同 context 字符串 = 互相独立的新密钥</td></tr>
+        <tr><td>幻影令牌模式</td><td>网关到内部微服务，同一信任边界</td><td>网关内省一次，签发短期 JWT 给下游，避免逐跳内省</td></tr>
+        <tr><td>OAuth2 Token Exchange</td><td>跨信任边界的委托调用</td><td>用 <code class="inline">act</code> claim 记录完整委托链，避免身份冒充</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="title">✅ 记住这条主线</div>
+      <p>服务对服务的认证方案越靠后越安全，也越复杂：静态密码 → 自签 JWT → mTLS 双向证书。凭据本身要走密钥管理服务而不是硬编码或裸放仓库；跨信任边界的调用要能追溯到最初发起请求的用户身份，避免混淆代理人攻击；同一信任边界内部则优先用短期自包含令牌换取性能。</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch10/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 10 章：Kubernetes 中的微服务 API</span></a>
+      <a class="next" href="../ch12/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 12 章：保护物联网通信 →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

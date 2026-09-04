@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API 安全实战教程</title>
+<link rel="stylesheet" href="assets/tutorial.css">
+<style>
+  .home-main { padding: 56px 48px 100px; max-width: 980px; margin: 0 auto; }
+  .hero { margin-bottom: 44px; }
+  .hero h1 { font-size: 36px; margin: 0 0 14px; }
+  .hero p { font-size: 16.5px; color: var(--text-dim); max-width: 720px; }
+  .hero .badges { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  .hero .badge {
+    font-size: 12.5px; font-weight: 600; color: var(--accent-ink);
+    background: var(--accent-dim); padding: 5px 12px; border-radius: 999px;
+  }
+  .stack-note {
+    display: flex; gap: 14px; align-items: flex-start; margin: 28px 0 48px;
+    background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 20px; box-shadow: var(--shadow);
+  }
+  .stack-note .icon { font-size: 22px; line-height: 1; }
+  .stack-note p { margin: 0; font-size: 14.5px; color: var(--text-dim); }
+  .stack-note strong { color: var(--text); }
+
+  .part-label {
+    font-size: 12.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-dim); margin: 40px 0 16px;
+  }
+  .chapters { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .chapter-card {
+    display: block; text-decoration: none; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg-alt); padding: 18px 20px; box-shadow: var(--shadow);
+    transition: transform .12s ease, border-color .12s ease;
+  }
+  .chapter-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .chapter-card .no { font-size: 12px; font-weight: 700; color: var(--accent-ink); }
+  .chapter-card h3 { margin: 6px 0 8px; font-size: 16.5px; color: var(--text); }
+  .chapter-card p { margin: 0; font-size: 13.5px; color: var(--text-dim); line-height: 1.6; }
+
+  footer.home-footer {
+    margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border);
+    font-size: 13px; color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+<main class="home-main">
+  <div class="hero">
+    <span class="kicker">Natter API · 中文教学版</span>
+    <h1>API 安全实战教程</h1>
+    <p>
+      本教程基于 Manning 出版社图书《API Security in Action》（Neil Madden 著）配套的 Natter 项目整理而成。
+      原书用 Java + Spark 框架，围绕一个社交类 API "Natter" 逐章加固安全性 —— 从最基础的输入校验、密码认证，
+      一路讲到 OAuth2、JWT、mTLS、Kubernetes 微服务安全，直到物联网设备的端到端加密。
+      每一章都配有大量图解和真实项目代码，帮助完全没有安全背景的开发者，从"是什么、为什么危险、怎么防"
+      三个层次理解每一个安全机制。
+    </p>
+    <div class="badges">
+      <span class="badge">13 章教程</span>
+      <span class="badge">中文讲解</span>
+      <span class="badge">图解优先</span>
+      <span class="badge">Java/Spark ⇄ Python/Django ⇄ TypeScript/Hono.js</span>
+    </div>
+  </div>
+
+  <div class="stack-note">
+    <div class="icon">🧩</div>
+    <p>
+      <strong>为什么每章都有三栏代码？</strong>
+      原书代码是 Java + Spark 微框架实现的。为了让熟悉 Python 或 Node.js 生态的读者也能对照学习，
+      每个关键安全机制都额外给出了 <strong>Django（Python）</strong> 和 <strong>Hono.js（TypeScript）</strong>
+      的等价实现，三栏内容实现的是同一件事，方便你按自己熟悉的技术栈理解、也能顺带学到另外两个栈的写法。
+      少数章节（如第 12、13 章的部分内容）涉及协议层/嵌入式场景，和具体 Web 框架关系不大，页面里会如实说明，
+      不会为了凑数编造不存在的 API。
+    </p>
+  </div>
+
+  <div class="part-label">Part 1 · 基础篇</div>
+  <div class="chapters">
+    <a class="chapter-card" href="ch01/tutorial.html">
+      <div class="no">第 1 章</div>
+      <h3>什么是 API 安全？</h3>
+      <p>用"考驾照"类比理解认证与授权；资产、安全目标、威胁模型；五大安全机制总览。全书概念地图。</p>
+    </a>
+    <a class="chapter-card" href="ch02/tutorial.html">
+      <div class="no">第 2 章</div>
+      <h3>安全的 API 开发</h3>
+      <p>认识 Natter 项目；SQL 注入、输入校验、XSS 与安全输出 —— 写代码时就该避免的基本坑。</p>
+    </a>
+    <a class="chapter-card" href="ch03/tutorial.html">
+      <div class="no">第 3 章</div>
+      <h3>为 Natter API 加固安全</h3>
+      <p>限流、密码认证、HTTPS/HSTS、审计日志、访问控制列表 —— 六大安全机制第一次集中登场。</p>
+    </a>
+  </div>
+
+  <div class="part-label">Part 2 · 基于 Token 的认证</div>
+  <div class="chapters">
+    <a class="chapter-card" href="ch04/tutorial.html">
+      <div class="no">第 4 章</div>
+      <h3>基于会话 Cookie 的认证</h3>
+      <p>Session Cookie、会话固定攻击、CSRF 攻防、SameSite 与双重提交 Cookie。</p>
+    </a>
+    <a class="chapter-card" href="ch05/tutorial.html">
+      <div class="no">第 5 章</div>
+      <h3>现代化的基于 Token 的认证</h3>
+      <p>CORS 跨域、Bearer Token、数据库存储 token、用 HMAC 加固 token 防篡改。</p>
+    </a>
+    <a class="chapter-card" href="ch06/tutorial.html">
+      <div class="no">第 6 章</div>
+      <h3>自包含 Token 与 JWT</h3>
+      <p>JWT 三段结构、签名与加密、认证加密（AEAD）、token 撤销的混合方案。</p>
+    </a>
+  </div>
+
+  <div class="part-label">Part 3 · 授权</div>
+  <div class="chapters">
+    <a class="chapter-card" href="ch07/tutorial.html">
+      <div class="no">第 7 章</div>
+      <h3>OAuth2 与 OpenID Connect</h3>
+      <p>授权码 + PKCE 完整时序、访问令牌校验、单点登录、OIDC ID Token。</p>
+    </a>
+    <a class="chapter-card" href="ch08/tutorial.html">
+      <div class="no">第 8 章</div>
+      <h3>基于身份的访问控制</h3>
+      <p>用户与组、RBAC 角色权限映射、ABAC 属性策略、策略代理与网关。</p>
+    </a>
+    <a class="chapter-card" href="ch09/tutorial.html">
+      <div class="no">第 9 章</div>
+      <h3>基于能力的安全与 Macaroon</h3>
+      <p>能力 URI、HATEOAS、confused deputy 问题，以及 Macaroon 的 HMAC caveat 链。</p>
+    </a>
+  </div>
+
+  <div class="part-label">Part 4 · Kubernetes 中的微服务 API</div>
+  <div class="chapters">
+    <a class="chapter-card" href="ch10/tutorial.html">
+      <div class="no">第 10 章</div>
+      <h3>Kubernetes 中的微服务 API</h3>
+      <p>容器化部署、Kubernetes 架构、SSRF 与 DNS rebinding 攻防、service mesh mTLS。</p>
+    </a>
+    <a class="chapter-card" href="ch11/tutorial.html">
+      <div class="no">第 11 章</div>
+      <h3>保护服务间调用的 API</h3>
+      <p>Client Credentials Grant、JWT Bearer 认证、mTLS、幻影令牌模式、密钥管理。</p>
+    </a>
+  </div>
+
+  <div class="part-label">Part 5 · 物联网 API</div>
+  <div class="chapters">
+    <a class="chapter-card" href="ch12/tutorial.html">
+      <div class="no">第 12 章</div>
+      <h3>保护物联网通信</h3>
+      <p>DTLS、预共享密钥、COSE 端到端加密、密钥棘轮与前向保密。</p>
+    </a>
+    <a class="chapter-card" href="ch13/tutorial.html">
+      <div class="no">第 13 章</div>
+      <h3>保护物联网 API</h3>
+      <p>设备认证、OSCORE、Device Authorization Grant、离线访问控制、全书回顾。</p>
+    </a>
+  </div>
+
+  <footer class="home-footer">
+    根据 Neil Madden《API Security in Action》(Manning, 2020) 及其配套 Natter 项目源码整理，
+    补充 Django / Hono.js 等价实现用于教学对比。
+  </footer>
+</main>
+</body>
+</html>

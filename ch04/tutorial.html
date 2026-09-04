@@ -1,0 +1,1085 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 章：基于会话 Cookie 的认证 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+<style>
+  .diagram text { font-size: 12px; }
+  .step-circle { fill: #fff; stroke: #5b6478; stroke-width: 1.2; }
+  .step-num { font-size: 11px; font-weight: 700; fill: #1c2333; }
+  .lifeline { stroke: #e2e5ee; stroke-width: 2; }
+  .flow-arrow { stroke: #5b6478; stroke-width: 1.5; fill: none; }
+  .flow-label { font-size: 12px; fill: #1c2333; }
+  .attr-table code.inline { white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">4.1 浏览器中的认证</a>
+      <a href="#s2">4.2 基于 Token 的认证</a>
+      <a href="#s3">4.3 会话 Cookie</a>
+      <a href="#s4">4.4 防止 CSRF 攻击</a>
+      <a href="#s5">4.5 构建 Natter 登录 UI</a>
+      <a href="#s6">4.6 实现登出</a>
+      <a href="#s7">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 4 章</span>
+    <h1>基于会话 Cookie 的认证</h1>
+    <p class="subtitle">从"每次请求都带用户名密码"升级到"登录一次、用 Cookie 记住我"，顺便挡住那个几乎所有 Web 开发者都踩过坑的攻击：CSRF。</p>
+
+    <p>
+      第 3 章里，Natter API 的每一次请求都要带上用户名和密码（HTTP Basic 认证），就像你每次进公司大楼都要重新出示身份证、还要保安现场打电话给 HR 核实一遍。这在安全上没问题，但慢，而且体验很差——密码要在网络上跑无数次，服务器要为每次请求都做一遍昂贵的密码哈希校验，浏览器弹出的登录框丑得没法看，用户也没法主动"退出登录"。
+    </p>
+    <p>
+      本章要做的事情，更接近你熟悉的"办一张门禁卡"：你在前台刷一次身份证（登录），拿到一张门禁卡（session token），之后进出各个房间只需要刷卡，保安扫一眼卡片上的编号，去后台系统查一下这张卡对应谁、有没有过期，就放你进去。这就是<strong>基于 Token 的认证</strong>，而"把门禁卡装进浏览器自动携带的口袋里"这件事，就是<strong>会话 Cookie（session cookie）</strong>。
+    </p>
+    <p>
+      但方便是有代价的：浏览器会在你毫不知情的情况下，把这张门禁卡"借"给任何一个网站去敲 Natter 的门——这就是本章后半段要重点搞定的 <strong>CSRF（跨站请求伪造）</strong>攻击。我们会一步步看清攻击是怎么发生的，然后用 <code class="inline">SameSite</code> Cookie 和"哈希双重提交 Cookie"两道防线把它挡住。
+    </p>
+
+    <h2 id="s1"><span class="num">4.1</span>浏览器中的认证</h2>
+
+    <p>
+      要理解为什么需要 Cookie，得先看看浏览器直接用 HTTP Basic 认证调用 API 会遇到什么麻烦。假设我们要给 Natter 做一个简单的网页界面：一个"创建社交空间"的表单，用 JavaScript 的 <code class="inline">fetch</code> 把表单数据打包成 JSON 发给 API。
+    </p>
+
+    <div class="callout note">
+      <div class="title">💡 为什么不能直接用 HTML 表单提交？</div>
+      <p>标准的 HTML <code class="inline">&lt;form&gt;</code> 只会把数据编码成 <code class="inline">application/x-www-form-urlencoded</code> 或 <code class="inline">multipart/form-data</code>，Natter API 只认 JSON。所以浏览器必须用 JavaScript 拦截表单提交，自己拼一个 JSON 请求发出去，而不能让浏览器用默认方式直接提交表单。</p>
+    </div>
+
+    <pre class="plain"><code>// src/main/resources/public/natter.js（书中 4.1 节，创建空间的最初版本）
+const apiUrl = 'https://localhost:4567';
+
+function createSpace(name, owner) {
+    let data = {name: name, owner: owner};
+    fetch(apiUrl + '/spaces', {
+        method: 'POST',
+        credentials: 'include',           // 让浏览器带上 Cookie / HTTP 认证信息
+        body: JSON.stringify(data),
+        headers: { 'Content-Type': 'application/json' }
+    })
+    .then(response => {
+        if (response.ok) { return response.json(); }
+        else { throw Error(response.statusText); }
+    })
+    .then(json => console.log('Created space: ', json.name, json.uri))
+    .catch(error => console.error('Error: ', error));
+}
+
+window.addEventListener('load', function(e) {
+    document.getElementById('createSpace')
+        .addEventListener('submit', processFormSubmit);
+});
+
+function processFormSubmit(e) {
+    e.preventDefault();               // 阻止浏览器用默认方式提交表单
+    let spaceName = document.getElementById('spaceName').value;
+    let owner = document.getElementById('owner').value;
+    createSpace(spaceName, owner);
+    return false;
+}</code></pre>
+
+    <p>
+      如果你把这个 HTML 文件直接用 <code class="inline">file://</code> 方式在浏览器里打开，会发现请求被浏览器拦下来了。原因是浏览器的<strong>同源策略（Same-Origin Policy，SOP）</strong>：JavaScript 默认只能向"和自己同源"的服务器发请求。
+    </p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是"同源"</div>
+      <p>一个 URL 的"源（origin）"由<strong>协议 + 主机名 + 端口</strong>三部分组成，三者都完全一致才算同源。比如 <code class="inline">https://api.example.com:8443/a</code> 和 <code class="inline">https://api.example.com:8443/b</code> 同源（路径不参与判断），但和 <code class="inline">http://api.example.com:8443/a</code>（协议不同）或 <code class="inline">https://www.example.com:8443/a</code>（主机名不同）都不同源。<code class="inline">file://</code> 打开的本地文件永远和任何 HTTPS 网站都不同源。</p>
+    </div>
+
+    <p>
+      解决办法很简单：让 Natter API 服务器自己把这些 HTML/JS 文件也一起托管出去，这样页面和 API 就是同一个源了。Spark 只需要一行配置：
+    </p>
+    <pre class="plain"><code>// Main.java —— 必须是 main 方法的第一行
+Spark.staticFiles.location("/public");</code></pre>
+    <p>这样 <code class="inline">src/main/resources/public/</code> 目录下的文件就能通过 <code class="inline">https://localhost:4567/natter.html</code> 直接访问，和 API 同源。</p>
+
+    <p>
+      同源之后，请求确实能发出去了——但因为 JS 代码没有主动带用户名密码，服务器返回 <code class="inline">401</code> 加一个 <code class="inline">WWW-Authenticate: Basic</code> 响应头，浏览器就会弹出那个丑陋的原生登录框，让用户输入用户名密码。这暴露了 HTTP Basic 认证在浏览器场景下的几个硬伤：
+    </p>
+
+    <div class="callout warn">
+      <div class="title">⚠️ HTTP Basic 认证在浏览器里的缺点</div>
+      <ul>
+        <li>密码在<strong>每一次</strong>请求里都要传一遍，暴露面被放大很多倍；如果是微服务架构，每个微服务都得安全地处理这份密码。</li>
+        <li>密码哈希校验很贵（上一章讲过，故意设计成约 100ms），如果每次请求都验一遍密码，每个 CPU 核心每秒只能撑住约 10 次请求。</li>
+        <li>浏览器原生登录框丑，也没法自定义样式和交互。</li>
+        <li>用户没有清晰的"退出登录"方式——关掉浏览器窗口通常都没用，在公共电脑上这是个实打实的安全问题。</li>
+      </ul>
+    </div>
+
+    <p>这些问题指向同一个方向：我们需要一种"登录一次、后面用一个轻量令牌代替密码"的机制——这就是下一节的 Token-based authentication。</p>
+
+    <h2 id="s2"><span class="num">4.2</span>基于 Token 的认证</h2>
+
+    <p>
+      核心思路很简单：新增一个专门的<strong>登录端点</strong>，客户端把用户名密码只发这一次；登录成功后，服务器生成一个随机字符串（token），把它交给客户端。之后客户端每次请求都带上这个 token 代替用户名密码，服务器去一个"token 存储"里查一下这个 token 对应谁、有没有过期。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 330" role="img" aria-label="基于 Token 的认证整体流程">
+        <defs>
+          <marker id="arrow1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="20" width="130" height="40" rx="8" fill="#2563eb"/>
+        <text x="85" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+
+        <rect x="480" y="20" width="150" height="40" rx="8" fill="#16a34a"/>
+        <text x="555" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+
+        <rect x="480" y="140" width="150" height="40" rx="8" fill="#7c3aed"/>
+        <text x="555" y="165" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Token Store</text>
+
+        <!-- step 1: login -->
+        <line x1="150" y1="80" x2="480" y2="80" class="flow-arrow" marker-end="url(#arrow1)"/>
+        <circle class="step-circle" cx="160" cy="80" r="10"/>
+        <text class="step-num" x="160" y="84" text-anchor="middle">1</text>
+        <text class="flow-label" x="320" y="73" text-anchor="middle">POST /sessions（用户名 + 密码）</text>
+
+        <!-- store token -->
+        <line x1="555" y1="60" x2="555" y2="140" class="flow-arrow" marker-end="url(#arrow1)"/>
+        <circle class="step-circle" cx="555" cy="105" r="10"/>
+        <text class="step-num" x="555" y="109" text-anchor="middle">2</text>
+        <text class="flow-label" x="590" y="108" text-anchor="start">写入新 token</text>
+
+        <!-- return token -->
+        <line x1="480" y1="110" x2="150" y2="110" class="flow-arrow" marker-end="url(#arrow1)"/>
+        <circle class="step-circle" cx="470" cy="110" r="10"/>
+        <text class="step-num" x="470" y="114" text-anchor="middle">3</text>
+        <text class="flow-label" x="320" y="103" text-anchor="middle">201 Created {"token": "…"}</text>
+
+        <!-- step 4 subsequent request -->
+        <line x1="150" y1="220" x2="480" y2="220" class="flow-arrow" marker-end="url(#arrow1)"/>
+        <circle class="step-circle" cx="160" cy="220" r="10"/>
+        <text class="step-num" x="160" y="224" text-anchor="middle">4</text>
+        <text class="flow-label" x="320" y="213" text-anchor="middle">POST /spaces（带上 token）</text>
+
+        <!-- lookup -->
+        <line x1="555" y1="200" x2="555" y2="140" class="flow-arrow" marker-end="url(#arrow1)"/>
+        <circle class="step-circle" cx="555" cy="200" r="10"/>
+        <text class="step-num" x="555" y="204" text-anchor="middle">5</text>
+        <text class="flow-label" x="590" y="203" text-anchor="start">查 token 是否有效</text>
+
+        <text x="320" y="260" text-anchor="middle" font-size="12.5" fill="#5b6478">服务器不需要再次验证密码，只需要在存储里查一次 token</text>
+      </svg>
+      <figcaption>图 4-1：基于 Token 的认证流程——登录端点签发 token，后续请求携带 token 而不是密码</figcaption>
+    </figure>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 Token / Session Token</div>
+      <p>Token 就是一个足够随机、猜不出来的字符串，通常有<strong>有效期</strong>。用户登录一次拿到它，之后拿它换取访问权限，直到过期或主动登出。用来标识"用户正在和网站交互"的短期 token，常被叫做 session token、session cookie，或者干脆叫 session。</p>
+    </div>
+
+    <h3 id="s2-1">4.2.1 Token 存储的抽象接口</h3>
+    <p>
+      这一章到第 6 章会陆续实现好几种不同的 token 存储方式（Cookie、数据库、自包含的加密 token……），所以书里先定义一个通用接口 <code class="inline">TokenStore</code>，把"怎么存 token"和"怎么用 token"解耦开。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch04/src/main/java/.../token/TokenStore.java</div>
+        <pre><code>public interface TokenStore {
+
+    String create(Request request, Token token);
+    Optional&lt;Token&gt; read(Request request, String tokenId);
+    void revoke(Request request, String tokenId);
+
+    class Token {
+        public final Instant expiry;
+        public final String username;
+        public final Map&lt;String, String&gt; attributes;
+
+        public Token(Instant expiry, String username) {
+            this.expiry = expiry;
+            this.username = username;
+            // 多线程会同时读写，所以用并发安全的 Map
+            this.attributes = new ConcurrentHashMap&lt;&gt;();
+        }
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">accounts/tokens.py（教学示例：抽象 token 存储）</div>
+        <pre><code>from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+
+@dataclass
+class Token:
+    expiry: datetime
+    username: str
+    attributes: dict = field(default_factory=dict)
+
+class TokenStore(ABC):
+    """对应 Java 的 TokenStore 接口。
+    Django 内置的 SessionStore 就是这里 create/read/revoke
+    的一种具体实现（见下一节）。"""
+
+    @abstractmethod
+    def create(self, request, token: Token) -> str: ...
+
+    @abstractmethod
+    def read(self, request, token_id: str) -> Token | None: ...
+
+    @abstractmethod
+    def revoke(self, request, token_id: str) -> None: ...</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/store.ts</div>
+        <pre><code>export interface Token {
+  expiry: Date;
+  username: string;
+  attributes: Record&lt;string, string&gt;;
+}
+
+export interface TokenStore {
+  create(c: Context, token: Token): Promise&lt;string&gt;;
+  read(c: Context, tokenId: string): Promise&lt;Token | null&gt;;
+  revoke(c: Context, tokenId: string): Promise&lt;void&gt;;
+}</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s2-2">4.2.2 实现基于 Token 的登录</h3>
+    <p>
+      有了抽象接口，登录端点的实现出乎意料地简单：复用第 3 章已经写好的 HTTP Basic 认证过滤器（<code class="inline">UserController</code>）去验证用户名密码，登录端点本身只管从请求属性里取出已经通过认证的用户名，塞进一个新 token，存进 <code class="inline">TokenStore</code>，把 token ID 返回给客户端。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch04/src/main/java/.../controller/TokenController.java（login 方法）</div>
+        <pre><code>public JSONObject login(Request request, Response response) {
+    // subject 属性是 UserController 的 HTTP Basic 过滤器
+    // 验证密码通过后设置的
+    String subject = request.attribute("subject");
+    var expiry = now().plus(10, ChronoUnit.MINUTES);
+
+    var token = new TokenStore.Token(expiry, subject);
+    var tokenId = tokenStore.create(request, token);
+
+    response.status(201);
+    return new JSONObject().put("token", tokenId);
+}
+
+// Main.java 里的路由装配：
+// before("/sessions", userController::requireAuthentication);
+// post("/sessions", tokenController::login);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">accounts/views.py</div>
+        <pre><code>from django.contrib.auth import authenticate, login
+from django.http import JsonResponse
+from django.views.decorators.http import require_POST
+from django.contrib.auth.decorators import login_not_required
+import base64
+
+@require_POST
+def session_login(request):
+    # 复用 HTTP Basic：手动解析 Authorization 头
+    auth = request.META.get("HTTP_AUTHORIZATION", "")
+    if not auth.startswith("Basic "):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    raw = base64.b64decode(auth[6:]).decode()
+    username, _, password = raw.partition(":")
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    login(request, user)                 # 创建 session，写入 Set-Cookie
+    request.session.set_expiry(60 * 10)  # 10 分钟过期
+    return JsonResponse({"token": request.session.session_key}, status=201)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/sessions.ts</div>
+        <pre><code>import { Hono } from "hono";
+import { basicAuth } from "hono/basic-auth";
+import { setCookie } from "hono/cookie";
+
+const sessions = new Hono();
+
+sessions.post("/sessions",
+  basicAuth({ verifyUser: verifyUserAgainstDb }),   // 复用 Basic 认证
+  async (c) => {
+    const username = c.get("subject");
+    const expiry = new Date(Date.now() + 10 * 60_000);
+
+    const tokenId = await tokenStore.create(c, { username, expiry, attributes: {} });
+
+    return c.json({ token: tokenId }, 201);
+  });
+
+export default sessions;</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s3"><span class="num">4.3</span>会话 Cookie</h2>
+    <p>
+      Token 存哪儿？浏览器场景下最经典的答案是 <strong>Cookie</strong>：登录响应带一个 <code class="inline">Set-Cookie</code> 头，浏览器记住它，之后每次请求到同一个网站都会自动在 <code class="inline">Cookie</code> 请求头里带上，服务器拿这个值去存储里查是谁。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 620 260" role="img" aria-label="会话Cookie登录与后续请求时序图">
+        <defs>
+          <marker id="arrow2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="120" height="36" rx="8" fill="#2563eb"/>
+        <text x="80" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">浏览器</text>
+        <rect x="480" y="10" width="120" height="36" rx="8" fill="#16a34a"/>
+        <text x="540" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+
+        <line x1="80" y1="46" x2="80" y2="245" class="lifeline"/>
+        <line x1="540" y1="46" x2="540" y2="245" class="lifeline"/>
+
+        <line x1="90" y1="80" x2="530" y2="80" class="flow-arrow" marker-end="url(#arrow2)"/>
+        <circle class="step-circle" cx="100" cy="80" r="10"/><text class="step-num" x="100" y="84" text-anchor="middle">1</text>
+        <text class="flow-label" x="310" y="73" text-anchor="middle">POST /sessions（用户名+密码）</text>
+
+        <line x1="530" y1="120" x2="90" y2="120" class="flow-arrow" marker-end="url(#arrow2)"/>
+        <circle class="step-circle" cx="510" cy="120" r="10"/><text class="step-num" x="510" y="124" text-anchor="middle">2</text>
+        <text class="flow-label" x="310" y="113" text-anchor="middle">Set-Cookie: JSESSIONID=xyz...; Secure; HttpOnly</text>
+
+        <line x1="90" y1="180" x2="530" y2="180" class="flow-arrow" marker-end="url(#arrow2)"/>
+        <circle class="step-circle" cx="100" cy="180" r="10"/><text class="step-num" x="100" y="184" text-anchor="middle">3</text>
+        <text class="flow-label" x="310" y="173" text-anchor="middle">POST /spaces   Cookie: JSESSIONID=xyz...</text>
+
+        <line x1="530" y1="220" x2="90" y2="220" class="flow-arrow" marker-end="url(#arrow2)"/>
+        <circle class="step-circle" cx="510" cy="220" r="10"/><text class="step-num" x="510" y="224" text-anchor="middle">4</text>
+        <text class="flow-label" x="310" y="213" text-anchor="middle">在 token 存储里查到 xyz... → 201 Created</text>
+      </svg>
+      <figcaption>图 4-2：会话 Cookie 认证——浏览器自动在后续请求上携带 Cookie，服务器凭它查找会话状态</figcaption>
+    </figure>
+
+    <div class="callout note">
+      <div class="title">💡 Cookie 违反 REST 的"无状态"原则吗？</div>
+      <p>严格说是的——服务器要为每个客户端保存状态。但用 Cookie 只标记"这个人是谁、登没登录"，副作用很小，而且 Cookie 自带很多其他技术拿不到的安全属性（比如自动按域名隔离、可以标记为仅 HTTPS 传输），所以书里认为这是一个"划算的违规"。</p>
+    </div>
+
+    <p>
+      Spark 底层用的 Jetty servlet 容器自带 session 支持：调用 <code class="inline">request.session(true)</code> 会返回当前请求关联的 session，如果不存在就新建一个，并自动加上 <code class="inline">Set-Cookie</code> 头；传 <code class="inline">false</code> 则只在已存在时返回，否则给 <code class="inline">null</code>。<code class="inline">CookieTokenStore</code> 就是把 <code class="inline">TokenStore</code> 接口薄薄地包在这套机制上。
+    </p>
+
+    <h3 id="s3-1">4.3.1 避免会话固定攻击（session fixation）</h3>
+
+    <div class="callout danger">
+      <div class="title">☠ 攻击是什么样的：会话固定</div>
+      <p>如果登录时"沿用已有 session"而不是"强制生成一个新 session"，攻击者就可以：① 自己先访问网站拿到一个合法但未登录的 session token；② 想办法把这个 token 塞进受害者的浏览器（比如利用 XSS，或者诱导受害者点击带 session 参数的链接）；③ 等受害者用这个 token 登录后，token 关联的用户名从"攻击者"变成了"受害者"——但 token 本身没变，攻击者手里那份原始 token 现在也能访问受害者的账户了。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 300" role="img" aria-label="会话固定攻击流程">
+        <defs>
+          <marker id="arrow3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="110" height="36" rx="8" fill="#dc2626"/>
+        <text x="75" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">攻击者</text>
+        <rect x="295" y="10" width="110" height="36" rx="8" fill="#16a34a"/>
+        <text x="350" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+        <rect x="570" y="10" width="110" height="36" rx="8" fill="#2563eb"/>
+        <text x="625" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">受害者</text>
+
+        <line x1="75" y1="46" x2="75" y2="290" class="lifeline"/>
+        <line x1="350" y1="46" x2="350" y2="290" class="lifeline"/>
+        <line x1="625" y1="46" x2="625" y2="290" class="lifeline"/>
+
+        <line x1="85" y1="80" x2="340" y2="80" class="flow-arrow" marker-end="url(#arrow3)"/>
+        <circle class="step-circle" cx="95" cy="80" r="10"/><text class="step-num" x="95" y="84" text-anchor="middle">1</text>
+        <text class="flow-label" x="210" y="73" text-anchor="middle">访问登录页，拿到 session=abc</text>
+
+        <line x1="85" y1="140" x2="615" y2="140" class="flow-arrow" marker-end="url(#arrow3)" stroke-dasharray="4 3"/>
+        <circle class="step-circle" cx="95" cy="140" r="10"/><text class="step-num" x="95" y="144" text-anchor="middle">2</text>
+        <text class="flow-label" x="350" y="133" text-anchor="middle">诱导受害者点击带 session=abc 的链接（XSS / URL 重写）</text>
+
+        <line x1="615" y1="190" x2="360" y2="190" class="flow-arrow" marker-end="url(#arrow3)"/>
+        <circle class="step-circle" cx="600" cy="190" r="10"/><text class="step-num" x="600" y="194" text-anchor="middle">3</text>
+        <text class="flow-label" x="480" y="183" text-anchor="middle">受害者用 session=abc 登录成功</text>
+
+        <text x="350" y="225" text-anchor="middle" font-size="12.5" fill="#7c3aed" font-weight="600">Token Store：session abc 的 username 从空 → "victim"</text>
+
+        <line x1="85" y1="260" x2="340" y2="260" class="flow-arrow" marker-end="url(#arrow3)"/>
+        <circle class="step-circle" cx="95" cy="260" r="10"/><text class="step-num" x="95" y="264" text-anchor="middle">4</text>
+        <text class="flow-label" x="210" y="253" text-anchor="middle">带 session=abc 请求 → 以受害者身份通过！</text>
+      </svg>
+      <figcaption>图 4-3：会话固定攻击——攻击者预先拿到一个 session token，诱导受害者用这个 token 登录，登录后攻击者手里的旧 token 也变成了合法凭证</figcaption>
+    </figure>
+
+    <p>
+      防御思路很直接：<strong>登录成功后，一律作废任何已存在的旧 session，重新生成一个全新的、攻击者不可能预测到的 session</strong>。这样即便攻击者提前塞入了一个 token，登录那一刻它就失效了。这是 4 个必须掌握的核心机制里的第②个。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch04/src/main/java/.../token/CookieTokenStore.java（create 方法节选）</div>
+        <pre><code>@Override
+public String create(Request request, Token token) {
+
+    var session = request.session(false);
+    if (session != null) {
+        session.invalidate();          // ① 先作废旧 session（如果有）
+    }
+    session = request.session(true);   // ② 再创建一个全新的、随机的 session
+
+    session.attribute("username", token.username);
+    session.attribute("expiry", token.expiry);
+    session.attribute("attrs", token.attributes);
+
+    return Base64url.encode(sha256(session.id()));
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">accounts/views.py</div>
+        <pre><code>from django.contrib.auth import login as django_login
+
+def session_login(request, user):
+    # Django 的 login() 内部已经会调用 cycle_key()，
+    # 但显式写出来更能说明这里在做什么：
+    if request.session.session_key:
+        request.session.cycle_key()    # 保留旧数据但换一个新的 session_key
+    django_login(request, user)        # 写入认证信息，触发 Set-Cookie
+    request.session.set_expiry(60 * 10)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/cookieStore.ts</div>
+        <pre><code>async function create(c: Context, token: Token): Promise&lt;string&gt; {
+  const oldSessionId = getCookie(c, "session_id");
+  if (oldSessionId) {
+    await db.delete(sessions).where(eq(sessions.id, oldSessionId));
+    deleteCookie(c, "session_id");     // ① 作废旧 session
+  }
+
+  const newSessionId = crypto.randomUUID();   // ② 生成全新、不可预测的 id
+  await db.insert(sessions).values({
+    id: newSessionId,
+    username: token.username,
+    expiry: token.expiry,
+  });
+
+  setCookie(c, "session_id", newSessionId, {
+    httpOnly: true, secure: true, sameSite: "Strict", path: "/",
+  });
+  return sha256Hex(newSessionId);
+}</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s3-2">4.3.2 Cookie 的安全属性</h3>
+    <p>Spark（准确说是底层的 Jetty）给 <code class="inline">JSESSIONID</code> Cookie 默认加了几个安全属性，这也是本章要求覆盖的第①个核心机制——理解每个属性是干什么的：</p>
+
+    <table class="attr-table">
+      <thead><tr><th>属性</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td><code class="inline">Secure</code></td><td>只在 HTTPS 连接上发送，网络窃听者拿不到明文 Cookie。</td></tr>
+        <tr><td><code class="inline">HttpOnly</code></td><td>JavaScript（<code class="inline">document.cookie</code>）读不到这个 Cookie，即使页面被 XSS，攻击脚本也偷不走它。</td></tr>
+        <tr><td><code class="inline">SameSite</code></td><td>只有"同站"发起的请求才会带上这个 Cookie，是 4.4 节防 CSRF 的第一道防线。</td></tr>
+        <tr><td><code class="inline">Domain</code></td><td>不设置时是 host-only（只发给完全一致的主机名），设置了会连子域名一起发——子域名一旦被攻破就会连带泄露 Cookie，能不设就不设。</td></tr>
+        <tr><td><code class="inline">Path</code></td><td>限制 Cookie 在哪些路径下发送，安全收益有限（可以被隐藏 iframe 绕过）。</td></tr>
+        <tr><td><code class="inline">Expires</code> / <code class="inline">Max-Age</code></td><td>登录用的会话 Cookie 建议都不设置，让浏览器关闭标签页就丢弃它，避免公用电脑上的残留登录。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="title">✅ 最佳实践：__Host- 前缀</div>
+      <p>把 Cookie 命名为 <code class="inline">__Host-session</code> 这种带 <code class="inline">__Host-</code> 前缀的名字，浏览器会强制要求它必须同时具备 <code class="inline">Secure</code> 属性、且不能设置 <code class="inline">Domain</code>（即必须是 host-only）。这样即使某个子域名被攻破，也没法伪造覆盖你的主域名 Cookie，是对抗子域名劫持（sub-domain hijacking）的一个简单又有效的手段。</p>
+    </div>
+
+    <p>curl 实测登录响应长这样，可以直接看到这些属性：</p>
+    <pre class="plain"><code>HTTP/1.1 201 Created
+Set-Cookie: JSESSIONID=node0hwk7s0nq6wvppqh0wbs0cha91.node0;Path=/;Secure;HttpOnly
+Content-Type: application/json
+
+{"token":"node0hwk7s0nq6wvppqh0wbs0cha91"}</code></pre>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch04/src/main/java/.../Main.java（启用 HTTPS，Jetty 据此默认加 Secure/HttpOnly）</div>
+        <pre><code>public static void main(String... args) throws Exception {
+    Spark.staticFiles.location("/public");
+    secure("localhost.p12", "changeit", null, null);   // 启用 HTTPS
+    ...
+}
+// Spark/Jetty 在 HTTPS 下默认对 JSESSIONID 加 Secure + HttpOnly。
+// SameSite 需要额外配置 SessionCookieConfig，本书用第二张显式
+// Cookie（csrfToken，见 4.4 节）来演示手动设置各属性。</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">settings.py</div>
+        <pre><code>SESSION_COOKIE_NAME = "__Host-session"
+SESSION_COOKIE_HTTPONLY = True     # 对应 HttpOnly
+SESSION_COOKIE_SECURE = True       # 对应 Secure，仅 HTTPS 发送
+SESSION_COOKIE_SAMESITE = "Strict" # 对应 SameSite=Strict
+SESSION_COOKIE_AGE = 60 * 10       # 10 分钟过期
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+# __Host- 前缀要求 Secure=True 且不能设置 SESSION_COOKIE_DOMAIN</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/tokens/cookieStore.ts</div>
+        <pre><code>import { setCookie } from "hono/cookie";
+
+setCookie(c, "__Host-session", sessionId, {
+  httpOnly: true,     // 对应 HttpOnly
+  secure: true,        // 对应 Secure
+  sameSite: "Strict",  // 对应 SameSite=Strict
+  path: "/",           // __Host- 前缀要求 path 必须是 "/"
+  // 不设置 maxAge/expires -> 关闭标签页后失效
+});</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s3-3">4.3.3 校验会话 Cookie</h3>
+    <p>
+      光签发 Cookie 还不够，还得有一道过滤器在每个请求进来时检查它：如果 Cookie 有效且没过期，就把用户名写进请求的 <code class="inline">subject</code> 属性，后面的权限检查才能认出"这是谁"。
+    </p>
+    <pre class="plain"><code>// TokenController.java（4.3.3 节的初版，暂时还没有 CSRF 防护——见下一节）
+public void validateToken(Request request, Response response) {
+    // WARNING: 这里还没有校验 CSRF token，见 4.4 节
+    tokenStore.read(request, null).ifPresent(token -> {
+        if (now().isBefore(token.expiry)) {
+            request.attribute("subject", token.username);
+            token.attributes.forEach(request::attribute);
+        }
+    });
+}
+// Main.java: before(userController::authenticate);
+//            before(tokenController::validateToken);</code></pre>
+    <p>接好之后，用 curl 模拟一次完整流程：登录拿 Cookie，再带着 Cookie 去访问受保护的接口：</p>
+    <pre class="plain"><code>$ curl -i -c /tmp/cookies -u test:password \
+    -H 'Content-Type: application/json' -X POST https://localhost:4567/sessions
+HTTP/1.1 201 Created
+Set-Cookie: JSESSIONID=node0l2q3fc024gw8wq4wp961y5rk0.node0;Path=/;Secure;HttpOnly
+{"token":"node0l2q3fc024gw8wq4wp961y5rk0"}
+
+$ curl -b /tmp/cookies -H 'Content-Type: application/json' \
+    -d '{"name":"test space","owner":"test"}' https://localhost:4567/spaces
+{"name":"test space","uri":"/spaces/1"}</code></pre>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 但这版本还有一个大洞</div>
+      <p>只要浏览器带着 Cookie，请求就能通过——问题是浏览器<strong>不管这个请求是谁发起的</strong>，只要目标网站是 Natter，就会自动带上 Cookie。任何一个恶意网站都可以借用户的浏览器，悄悄发一个带 Cookie 的请求到 Natter，而这正是下一节要解决的 CSRF 问题。</p>
+    </div>
+
+    <h2 id="s4"><span class="num">4.4</span>防止 CSRF 攻击</h2>
+
+    <p>
+      设想这样一个场景：你刚登录完 Natter，收到市场部小美发来的一条消息，说点这个链接能拿 Manning 图书 8 折优惠。你满怀期待地点了进去，页面告诉你"优惠已过期"，你有点失望地回到 Natter，却发现自己的账号已经给好几个朋友群发了骚扰消息——而这一切，都是你从来没有主动做过的操作。
+    </p>
+
+    <div class="callout danger">
+      <div class="title">☠ 攻击是什么样的：CSRF</div>
+      <p>那个"优惠链接"网页里藏了一段 JavaScript，趁你浏览器还处于登录状态，偷偷向 Natter API 发起了一个跨站请求（比如 <code class="inline">POST /spaces/1/messages</code>）。因为 Cookie 是浏览器自动附带的，Natter 服务器收到的请求里带着你的 <code class="inline">JSESSIONID</code>，看起来和你自己发的请求毫无区别，于是就照单全收了。同源策略只挡住了"恶意网站读取响应内容"，并没有挡住"发出这个请求"本身。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 380" role="img" aria-label="CSRF攻击是如何发生的">
+        <defs>
+          <marker id="arrow4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="15" y="10" width="130" height="36" rx="8" fill="#2563eb"/>
+        <text x="80" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">用户的浏览器</text>
+        <rect x="285" y="10" width="130" height="36" rx="8" fill="#d97706"/>
+        <text x="350" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">恶意网站</text>
+        <rect x="555" y="10" width="130" height="36" rx="8" fill="#16a34a"/>
+        <text x="620" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+
+        <line x1="80" y1="46" x2="80" y2="370" class="lifeline"/>
+        <line x1="350" y1="46" x2="350" y2="370" class="lifeline"/>
+        <line x1="620" y1="46" x2="620" y2="370" class="lifeline"/>
+
+        <line x1="90" y1="80" x2="610" y2="80" class="flow-arrow" marker-end="url(#arrow4)"/>
+        <circle class="step-circle" cx="100" cy="80" r="10"/><text class="step-num" x="100" y="84" text-anchor="middle">1</text>
+        <text class="flow-label" x="350" y="73" text-anchor="middle">登录 Natter，成功</text>
+
+        <line x1="610" y1="120" x2="90" y2="120" class="flow-arrow" marker-end="url(#arrow4)"/>
+        <circle class="step-circle" cx="600" cy="120" r="10"/><text class="step-num" x="600" y="124" text-anchor="middle">2</text>
+        <text class="flow-label" x="350" y="113" text-anchor="middle">Set-Cookie: JSESSIONID=xyz...（浏览器记住）</text>
+
+        <line x1="90" y1="170" x2="340" y2="170" class="flow-arrow" marker-end="url(#arrow4)"/>
+        <circle class="step-circle" cx="100" cy="170" r="10"/><text class="step-num" x="100" y="174" text-anchor="middle">3</text>
+        <text class="flow-label" x="215" y="163" text-anchor="middle">点击"8折优惠"链接</text>
+
+        <line x1="340" y1="220" x2="90" y2="220" class="flow-arrow" marker-end="url(#arrow4)"/>
+        <circle class="step-circle" cx="330" cy="220" r="10"/><text class="step-num" x="330" y="224" text-anchor="middle">4</text>
+        <text class="flow-label" x="215" y="213" text-anchor="middle">返回含恶意 JS 的页面</text>
+
+        <line x1="90" y1="270" x2="610" y2="270" class="flow-arrow" marker-end="url(#arrow4)" stroke="#dc2626"/>
+        <circle class="step-circle" cx="100" cy="270" r="10" stroke="#dc2626"/><text class="step-num" x="100" y="274" text-anchor="middle" fill="#dc2626">5</text>
+        <text class="flow-label" x="350" y="263" text-anchor="middle" fill="#dc2626" font-weight="600">恶意JS发起 POST /spaces/1/messages，浏览器自动附带 Cookie: JSESSIONID=xyz...</text>
+
+        <line x1="610" y1="320" x2="90" y2="320" class="flow-arrow" marker-end="url(#arrow4)" stroke="#dc2626"/>
+        <circle class="step-circle" cx="600" cy="320" r="10" stroke="#dc2626"/><text class="step-num" x="600" y="324" text-anchor="middle" fill="#dc2626">6</text>
+        <text class="flow-label" x="350" y="313" text-anchor="middle" fill="#dc2626" font-weight="600">Cookie 有效 → 201 Created（消息真的发出去了！）</text>
+
+        <text x="350" y="355" text-anchor="middle" font-size="12" fill="#5b6478">恶意网站读不到步骤 6 的响应内容，但请求已经真实执行——这就是 CSRF 的危险之处</text>
+      </svg>
+      <figcaption>图 4-4：CSRF 攻击是如何发生的——恶意网站借用户浏览器里已登录的 Cookie，伪造一个跨站请求，服务器无法分辨这不是用户本人发出的</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 重要前提：GET 请求必须"无副作用"</div>
+      <p>几乎所有 CSRF 防护手段都假设 GET 请求是安全的、不会修改任何数据。如果你的 API 允许用 GET 请求执行删除、转账之类的操作，那么任何一个 <code class="inline">&lt;img src="..."&gt;</code> 标签就能触发 CSRF，本节讲的所有防护都救不了你。</p>
+    </div>
+
+    <h3 id="s4-1">4.4.1 SameSite Cookie</h3>
+    <p>
+      第一道防线很简单：给 Cookie 加上 <code class="inline">SameSite=Strict</code>（或 <code class="inline">Lax</code>）属性。浏览器就只会在"同站"发起的请求里带上这个 Cookie，跨站请求（比如从恶意网站发出的）根本不会附带 Cookie。
+    </p>
+
+    <div class="callout note">
+      <div class="title">💡 "同站"和"同源"不是一回事</div>
+      <p>SameSite 判断的是<strong>可注册域（registerable domain，也叫 eTLD+1）</strong>是否相同，不看协议和端口。<code class="inline">api.example.com</code> 和 <code class="inline">www.example.com</code> 算同站，但 <code class="inline">example.com</code> 和 <code class="inline">example.org</code> 不算。<code class="inline">Strict</code> 模式下连"用户主动点击一个跨站链接"都不带 Cookie；<code class="inline">Lax</code> 模式对这种"顶层导航点击"网开一面，但仍然挡住脚本发起的跨站请求。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 300" role="img" aria-label="SameSite Cookie如何挡住CSRF">
+        <defs>
+          <marker id="arrow5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="15" y="10" width="130" height="36" rx="8" fill="#2563eb"/>
+        <text x="80" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">用户的浏览器</text>
+        <rect x="285" y="10" width="130" height="36" rx="8" fill="#d97706"/>
+        <text x="350" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">恶意网站</text>
+        <rect x="555" y="10" width="130" height="36" rx="8" fill="#16a34a"/>
+        <text x="620" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+
+        <line x1="80" y1="46" x2="80" y2="290" class="lifeline"/>
+        <line x1="350" y1="46" x2="350" y2="290" class="lifeline"/>
+        <line x1="620" y1="46" x2="620" y2="290" class="lifeline"/>
+
+        <line x1="90" y1="80" x2="610" y2="80" class="flow-arrow" marker-end="url(#arrow5)"/>
+        <circle class="step-circle" cx="100" cy="80" r="10"/><text class="step-num" x="100" y="84" text-anchor="middle">1</text>
+        <text class="flow-label" x="350" y="73" text-anchor="middle">登录 Natter</text>
+
+        <line x1="610" y1="120" x2="90" y2="120" class="flow-arrow" marker-end="url(#arrow5)"/>
+        <circle class="step-circle" cx="600" cy="120" r="10"/><text class="step-num" x="600" y="124" text-anchor="middle">2</text>
+        <text class="flow-label" x="350" y="113" text-anchor="middle">Set-Cookie: JSESSIONID=xyz...; SameSite=Strict</text>
+
+        <line x1="90" y1="170" x2="340" y2="170" class="flow-arrow" marker-end="url(#arrow5)"/>
+        <circle class="step-circle" cx="100" cy="170" r="10"/><text class="step-num" x="100" y="174" text-anchor="middle">3</text>
+        <text class="flow-label" x="215" y="163" text-anchor="middle">访问恶意网站</text>
+
+        <line x1="90" y1="220" x2="610" y2="220" class="flow-arrow" marker-end="url(#arrow5)" stroke="#16a34a"/>
+        <circle class="step-circle" cx="100" cy="220" r="10" stroke="#16a34a"/><text class="step-num" x="100" y="224" text-anchor="middle" fill="#16a34a">4</text>
+        <text class="flow-label" x="350" y="213" text-anchor="middle" fill="#16a34a" font-weight="600">恶意JS发起跨站请求 —— 浏览器不附带 Cookie</text>
+
+        <line x1="610" y1="260" x2="90" y2="260" class="flow-arrow" marker-end="url(#arrow5)" stroke="#16a34a"/>
+        <circle class="step-circle" cx="600" cy="260" r="10" stroke="#16a34a"/><text class="step-num" x="600" y="264" text-anchor="middle" fill="#16a34a">5</text>
+        <text class="flow-label" x="350" y="253" text-anchor="middle" fill="#16a34a" font-weight="600">无 Cookie → 未认证 → 401 拒绝</text>
+      </svg>
+      <figcaption>图 4-5：SameSite Cookie 如何挡住 CSRF——跨站请求不再自动携带 Cookie，服务器直接判定为未认证</figcaption>
+    </figure>
+
+    <div class="callout warn">
+      <div class="title">⚠️ SameSite 不是万能的</div>
+      <p>SameSite 的保护范围包含所有子域名，只要<strong>其中一个</strong>子域名被攻破（比如子域名劫持），攻击者就能绕过这层防护；而且不是所有历史浏览器和框架都完整支持它。所以书里把 SameSite 当作"纵深防御"的第一层，紧接着要上第二层更硬核的防护——双重提交 Cookie。</p>
+    </div>
+
+    <h3 id="s4-2">4.4.2 基于哈希的双重提交 Cookie</h3>
+    <p>
+      更强的思路是：让调用方"证明自己知道 session Cookie 的值"。传统 Web 应用的做法是在表单里塞一个隐藏字段，但 JSON API 没有表单。API 世界的等价做法叫<strong>双重提交 Cookie（double-submit cookie）</strong>：登录时额外返回第二个 Cookie（不加 <code class="inline">HttpOnly</code>，JS 可以读到），要求客户端把它同时读出来、放进一个自定义请求头（比如 <code class="inline">X-CSRF-Token</code>）里再发一次。服务器检查这两份是否一致。
+    </p>
+    <p>
+      传统双重提交 Cookie 有个弱点：如果攻击者能设法覆盖（overwrite）掉这第二个 Cookie（比如通过子域名攻破），就能自己填一个已知值，再在请求头里带上同样的值，照样能骗过校验。Natter 用的是更稳的变体——<strong>哈希绑定</strong>：这个 CSRF token 不是随机生成的，而是 session Cookie 的 <strong>SHA-256 哈希值</strong>。这样一来，除非攻击者能读到（或猜到）真正的 session 值，否则算不出正确的哈希，覆盖第二个 Cookie 也没用。
+    </p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 340" role="img" aria-label="哈希双重提交Cookie如何挡住CSRF">
+        <defs>
+          <marker id="arrow6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="15" y="10" width="130" height="36" rx="8" fill="#2563eb"/>
+        <text x="80" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">合法客户端</text>
+        <rect x="285" y="10" width="130" height="36" rx="8" fill="#16a34a"/>
+        <text x="350" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+        <rect x="555" y="10" width="130" height="36" rx="8" fill="#d97706"/>
+        <text x="620" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">恶意网站</text>
+
+        <line x1="80" y1="46" x2="80" y2="330" class="lifeline"/>
+        <line x1="350" y1="46" x2="350" y2="330" class="lifeline"/>
+        <line x1="620" y1="46" x2="620" y2="330" class="lifeline"/>
+
+        <line x1="90" y1="80" x2="340" y2="80" class="flow-arrow" marker-end="url(#arrow6)"/>
+        <circle class="step-circle" cx="100" cy="80" r="10"/><text class="step-num" x="100" y="84" text-anchor="middle">1</text>
+        <text class="flow-label" x="215" y="73" text-anchor="middle">登录（session=xyz）</text>
+
+        <line x1="340" y1="120" x2="90" y2="120" class="flow-arrow" marker-end="url(#arrow6)"/>
+        <circle class="step-circle" cx="330" cy="120" r="10"/><text class="step-num" x="330" y="124" text-anchor="middle">2</text>
+        <text class="flow-label" x="215" y="113" text-anchor="middle">JSON 返回 token=SHA-256(xyz)=abc</text>
+
+        <line x1="90" y1="160" x2="340" y2="160" class="flow-arrow" marker-end="url(#arrow6)"/>
+        <circle class="step-circle" cx="100" cy="160" r="10"/><text class="step-num" x="100" y="164" text-anchor="middle">3</text>
+        <text class="flow-label" x="215" y="153" text-anchor="middle">JS 把 abc 存进不带 HttpOnly 的 csrfToken Cookie</text>
+
+        <line x1="90" y1="200" x2="340" y2="200" class="flow-arrow" marker-end="url(#arrow6)" stroke="#16a34a"/>
+        <circle class="step-circle" cx="100" cy="200" r="10" stroke="#16a34a"/><text class="step-num" x="100" y="204" text-anchor="middle" fill="#16a34a">4</text>
+        <text class="flow-label" x="215" y="193" text-anchor="middle" fill="#16a34a" font-weight="600">请求带 Cookie:session=xyz + Header:X-CSRF-Token=abc</text>
+
+        <line x1="340" y1="230" x2="90" y2="230" class="flow-arrow" marker-end="url(#arrow6)" stroke="#16a34a"/>
+        <text class="flow-label" x="215" y="223" text-anchor="middle" fill="#16a34a" font-weight="600">SHA-256(xyz)==abc ✓ → 放行</text>
+
+        <line x1="610" y1="270" x2="360" y2="270" class="flow-arrow" marker-end="url(#arrow6)" stroke="#dc2626"/>
+        <circle class="step-circle" cx="600" cy="270" r="10" stroke="#dc2626"/><text class="step-num" x="600" y="274" text-anchor="middle" fill="#dc2626">5</text>
+        <text class="flow-label" x="480" y="263" text-anchor="middle" fill="#dc2626" font-weight="600">恶意网站读不到 xyz，也算不出它的哈希</text>
+
+        <line x1="610" y1="310" x2="360" y2="310" class="flow-arrow" marker-end="url(#arrow6)" stroke="#dc2626"/>
+        <text class="flow-label" x="480" y="303" text-anchor="middle" fill="#dc2626" font-weight="600">哪怕覆盖了 csrfToken Cookie，哈希对不上 → 拒绝</text>
+      </svg>
+      <figcaption>图 4-6：哈希绑定的双重提交 Cookie 如何挡住 CSRF——CSRF token 是 session 的哈希值，攻击者既读不到 session，也算不出正确的哈希</figcaption>
+    </figure>
+
+    <div class="callout danger">
+      <div class="title">☠ 别用普通的字符串比较</div>
+      <p>校验哈希值相不相等时，如果用普通的 <code class="inline">==</code> / <code class="inline">.equals()</code>，很多语言的实现会在发现第一个不匹配字符时就提前退出循环，这个"提前退出"的时间差可以被攻击者远程测量出来，一个字符一个字符地把正确值试出来（时序攻击 / timing attack）。必须使用<strong>常数时间比较</strong>函数，比如 Java 的 <code class="inline">MessageDigest.isEqual</code>、Python 的 <code class="inline">hmac.compare_digest</code>、Node.js 的 <code class="inline">crypto.timingSafeEqual</code>。</p>
+    </div>
+
+    <h3 id="s4-3">4.4.3 Natter 里的双重提交实现</h3>
+    <p>
+      具体落地上，<code class="inline">CookieTokenStore.create()</code> 不再直接把 session id 作为 token 返回给客户端，而是返回它的 SHA-256 哈希（用 URL-safe Base64 编码成字符串）；<code class="inline">read()</code> 则要求调用方传入这个哈希值，重新计算一遍当前 session 的哈希，用常数时间比较两者是否一致。这是本章要求覆盖的第③个核心机制。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch04/src/main/java/.../token/CookieTokenStore.java（read 方法，含哈希校验）</div>
+        <pre><code>@Override
+public Optional&lt;Token&gt; read(Request request, String tokenId) {
+    var session = request.session(false);
+    if (session == null) {
+        return Optional.empty();
+    }
+
+    var provided = Base64url.decode(tokenId);
+    var computed = sha256(session.id());
+
+    if (!MessageDigest.isEqual(computed, provided)) {   // 常数时间比较
+        return Optional.empty();
+    }
+
+    var token = new Token(session.attribute("expiry"),
+            session.attribute("username"));
+    token.attributes.putAll(session.attribute("attrs"));
+    return Optional.of(token);
+}
+
+static byte[] sha256(String tokenId) {
+    var sha256 = MessageDigest.getInstance("SHA-256");
+    return sha256.digest(tokenId.getBytes(StandardCharsets.UTF_8));
+}
+
+// TokenController.java —— 从请求头里取 CSRF token：
+// public void validateToken(Request request, Response response) {
+//     var tokenId = request.headers("X-CSRF-Token");
+//     if (tokenId == null) return;
+//     tokenStore.read(request, tokenId).ifPresent(token -> { ... });
+// }</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">middleware/csrf.py（教学示例：贴近书中"哈希绑定 session"的写法）</div>
+        <pre><code># Django 内置 CsrfViewMiddleware 默认是"随机值双重提交"，
+# 可以打开 CSRF_USE_SESSIONS=True 让 token 与 session 绑定；
+# 这里手写一个哈希绑定版本，逻辑上对应 Java 的 CookieTokenStore：
+import hashlib, hmac, base64
+
+def compute_csrf_token(session_key: str) -> str:
+    digest = hashlib.sha256(session_key.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+class HashDoubleSubmitCsrfMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            provided = request.headers.get("X-CSRF-Token")
+            expected = compute_csrf_token(request.session.session_key or "")
+            if not provided or not hmac.compare_digest(provided, expected):
+                return JsonResponse({"error": "unauthorized"}, status=401)
+        return self.get_response(request)
+
+# settings.py: CSRF_COOKIE_HTTPONLY = False   # 前端要能读到它</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/csrf.ts</div>
+        <pre><code>import { createHash, timingSafeEqual } from "node:crypto";
+import { getCookie } from "hono/cookie";
+import type { MiddlewareHandler } from "hono";
+
+function sha256(input: string): Buffer {
+  return createHash("sha256").update(input).digest();
+}
+
+export const csrfDoubleSubmit: MiddlewareHandler = async (c, next) => {
+  const sessionId = getCookie(c, "session_id");
+  const provided = c.req.header("X-CSRF-Token");
+
+  if (!sessionId || !provided) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  const computed = sha256(sessionId);
+  const providedBuf = Buffer.from(provided, "base64url");
+
+  if (providedBuf.length !== computed.length ||
+      !timingSafeEqual(computed, providedBuf)) {   // 常数时间比较
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  await next();
+};</code></pre>
+      </div>
+    </div>
+
+    <p>实测一下：不带 <code class="inline">X-CSRF-Token</code> 头的请求会被当成未认证直接拒绝——哪怕 Cookie 是对的：</p>
+    <pre class="plain"><code>$ curl -i -b /tmp/cookies -H 'Content-Type: application/json' \
+    -d '{"name":"test space","owner":"test"}' https://localhost:4567/spaces
+HTTP/1.1 401 Unauthorized
+
+$ curl -i -b /tmp/cookies -H 'Content-Type: application/json' \
+    -H 'X-CSRF-Token: gB7CiKkxx0FFsR4lhV9hsvA1nyT7Nw5YkJw_ysMm6ic' \
+    -d '{"name":"test space","owner":"test"}' https://localhost:4567/spaces
+HTTP/1.1 201 Created
+{"name":"test space","uri":"/spaces/1"}</code></pre>
+
+    <h2 id="s5"><span class="num">4.5</span>构建 Natter 登录 UI</h2>
+    <p>
+      有了后端能力，前端补一个登录页：一个用户名 + 密码的表单，提交后用 <code class="inline">fetch</code> 把凭证以 <code class="inline">Authorization: Basic ...</code> 的形式发到 <code class="inline">/sessions</code>，成功后把返回的 token 写进 <code class="inline">csrfToken</code> Cookie（注意这个 Cookie 是 JS 自己写的，不能带 <code class="inline">HttpOnly</code>，因为后面还要靠 JS 读出来放进请求头），再跳转回主页。
+    </p>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 别让浏览器弹原生登录框</div>
+      <p>如果 API 在 401 响应里带了 <code class="inline">WWW-Authenticate: Basic</code> 头，浏览器会自动弹出丑陋的原生登录框，盖过我们自己做的登录页。解决办法是 <code class="inline">requireAuthentication</code> 只管 <code class="inline">halt(401)</code>，<strong>不要</strong>再设置这个响应头。</p>
+    </div>
+
+    <pre class="plain"><code>// UserController.java
+public void requireAuthentication(Request request, Response response) {
+    if (request.attribute("subject") == null) {
+        halt(401);   // 故意不设置 WWW-Authenticate，避免触发浏览器原生登录框
+    }
+}</code></pre>
+
+    <pre class="plain"><code>// src/main/resources/public/login.js（真实项目文件，节选）
+function login(username, password) {
+    let credentials = 'Basic ' + btoa(username + ':' + password);
+
+    fetch(apiUrl + '/sessions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': credentials
+        }
+    })
+    .then(res => {
+       if (res.ok) {
+         res.json().then(json => {
+            // csrfToken 不能标 HttpOnly，因为下面 natter.js 还要读它
+            document.cookie = 'csrfToken=' + json.token +
+                ';Secure;SameSite=strict';
+            window.location.replace('/natter.html');
+         });
+       }
+    })
+    .catch(error => console.error('Error logging in: ', error));
+}</code></pre>
+
+    <p>主页 <code class="inline">natter.js</code> 在发起业务请求前，从 <code class="inline">document.cookie</code> 里手动解析出 <code class="inline">csrfToken</code>，塞进 <code class="inline">X-CSRF-Token</code> 请求头；如果服务器返回 401，就跳回登录页：</p>
+    <pre class="plain"><code>// src/main/resources/public/natter.js（真实项目文件，节选）
+function getCookie(cookieName) {
+    var cookieValue = document.cookie.split(';')
+        .map(item => item.split('=')
+            .map(x => decodeURIComponent(x.trim())))
+        .filter(item => item[0] === cookieName)[0]
+    if (cookieValue) { return cookieValue[1]; }
+}
+
+function createSpace(name, owner) {
+    let data = {name: name, owner: owner};
+    let csrfToken = getCookie('csrfToken');
+
+    fetch(apiUrl + '/spaces', {
+        method: 'POST',
+        credentials: 'include',
+        body: JSON.stringify(data),
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        }
+    })
+    .then(response => {
+        if (response.ok) { return response.json(); }
+        else if (response.status === 401) {
+            window.location.replace('/login.html');
+        } else { throw Error(response.statusText); }
+    })
+    .then(json => console.log('Created space: ', json.name, json.uri))
+    .catch(error => console.error('Error: ', error));
+}</code></pre>
+
+    <p>登录之后，浏览器的开发者工具里能同时看到两块 Cookie：服务器设置的 <code class="inline">JSESSIONID</code>（带 <code class="inline">HttpOnly</code>，JS 读不到）和前端自己设置的 <code class="inline">csrfToken</code>（不带 <code class="inline">HttpOnly</code>，专门给 JS 读）。这正是"真正的会话密钥"和"只用来证明你能读到会话密钥的哈希值"之间的分工。</p>
+
+    <h2 id="s6"><span class="num">4.6</span>实现登出</h2>
+    <p>
+      想象你在朋友家借用电脑登录了 Natter，用完了想退出，好让朋友看不到你的私信。仅仅在浏览器里删掉 Cookie 是不够的——万一删除失败（比如 <code class="inline">Path</code>/<code class="inline">Domain</code> 没对上），或者 Cookie 被某个配置不当的网络缓存留了一份，旧 token 依然有效。所以登出必须在<strong>服务器端把 token 吊销掉</strong>，这是本章要求覆盖的第④个核心机制。
+    </p>
+    <p>
+      先给 <code class="inline">TokenStore</code> 接口加一个 <code class="inline">revoke</code> 方法。对 <code class="inline">CookieTokenStore</code> 来说，实现就是校验完 CSRF token（防止攻击者恶意登出别人）之后调用 <code class="inline">session.invalidate()</code>——它会把 session 从服务器端存储里删掉，并在响应里加一个"过期时间在过去"的 <code class="inline">Set-Cookie</code>，让浏览器立刻清掉这块 Cookie。
+    </p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch04/src/main/java/.../token/CookieTokenStore.java + controller/TokenController.java</div>
+        <pre><code>// CookieTokenStore.java
+@Override
+public void revoke(Request request, String tokenId) {
+    var session = request.session(false);
+    if (session == null) return;
+
+    var provided = Base64url.decode(tokenId);
+    var computed = sha256(session.id());
+    if (!MessageDigest.isEqual(computed, provided)) {
+        return;                       // CSRF token 不对，拒绝吊销
+    }
+    session.invalidate();             // 服务器端删除 + 让浏览器清 Cookie
+}
+
+// TokenController.java
+public JSONObject logout(Request request, Response response) {
+    var tokenId = request.headers("X-CSRF-Token");
+    if (tokenId == null)
+        throw new IllegalArgumentException("missing token header");
+
+    tokenStore.revoke(request, tokenId);
+    response.status(200);
+    return new JSONObject();
+}
+
+// Main.java: delete("/sessions", tokenController::logout);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">accounts/views.py</div>
+        <pre><code>from django.contrib.auth import logout as django_logout
+from django.views.decorators.http import require_http_methods
+
+@require_http_methods(["DELETE"])
+def session_logout(request):
+    provided = request.headers.get("X-CSRF-Token")
+    expected = compute_csrf_token(request.session.session_key or "")
+    if not provided or not hmac.compare_digest(provided, expected):
+        return JsonResponse({"error": "missing token header"}, status=400)
+
+    django_logout(request)         # request.session.flush()，
+                                    # 服务器端删记录 + 响应里带过期 Cookie
+    return JsonResponse({}, status=200)
+
+# urls.py: path("sessions", session_logout, name="logout") # DELETE 方法</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/sessions.ts</div>
+        <pre><code>import { deleteCookie, getCookie } from "hono/cookie";
+
+sessions.delete("/sessions", async (c) => {
+  const tokenId = c.req.header("X-CSRF-Token");
+  if (!tokenId) {
+    return c.json({ error: "missing token header" }, 400);
+  }
+
+  const sessionId = getCookie(c, "session_id");
+  if (sessionId) {
+    const computed = sha256Hex(sessionId);
+    if (computed === tokenId) {
+      await db.delete(sessions).where(eq(sessions.id, sessionId)); // 删数据库记录
+    }
+  }
+  deleteCookie(c, "session_id", { path: "/" });   // 清 Cookie
+  return c.json({}, 200);
+});</code></pre>
+      </div>
+    </div>
+
+    <p>登出后再用旧 Cookie 请求会直接被拒绝，因为服务器端已经查不到这个 session 了：</p>
+    <pre class="plain"><code>$ curl -i -b /tmp/cookies -H 'X-CSRF-Token: gB7Ci...' -X DELETE https://localhost:4567/sessions
+HTTP/1.1 200 OK
+
+$ curl -i -b /tmp/cookies -H 'X-CSRF-Token: gB7Ci...' \
+    -d '{"name":"another space","owner":"test"}' https://localhost:4567/spaces
+HTTP/1.1 401 Unauthorized</code></pre>
+
+    <h2 id="s7">本章小结</h2>
+    <table>
+      <thead><tr><th>机制</th><th>解决的问题</th><th>关键实现</th></tr></thead>
+      <tbody>
+        <tr><td>Token / 会话</td><td>避免每次请求都传密码，减少暴露面和计算开销</td><td><code class="inline">TokenStore</code> 抽象 + <code class="inline">CookieTokenStore</code></td></tr>
+        <tr><td>Cookie 安全属性</td><td>限制 Cookie 的使用范围和传输方式</td><td><code class="inline">Secure</code> / <code class="inline">HttpOnly</code> / <code class="inline">SameSite</code> / <code class="inline">__Host-</code> 前缀</td></tr>
+        <tr><td>登录时重建 session</td><td>防止会话固定攻击</td><td>先 <code class="inline">invalidate()</code> 旧 session，再 <code class="inline">session(true)</code> 建新 session</td></tr>
+        <tr><td>SameSite Cookie</td><td>让跨站请求默认不携带 Cookie</td><td><code class="inline">SameSite=Strict/Lax</code></td></tr>
+        <tr><td>哈希双重提交 Cookie</td><td>即使 SameSite 被绕过，也要求调用方证明自己"知道"session 值</td><td>CSRF token = <code class="inline">SHA-256(session id)</code>，常数时间比较</td></tr>
+        <tr><td>登出</td><td>让用户能主动、可靠地结束会话</td><td>服务器端 <code class="inline">revoke</code> + 校验 CSRF token 后 <code class="inline">invalidate()</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="title">✅ 记住这几条</div>
+      <ul>
+        <li>会话 Cookie 认证只适合<strong>和 API 同源的第一方浏览器客户端</strong>；跨域、非浏览器客户端要看第 5 章的方案。</li>
+        <li>登录成功后<strong>必须</strong>让旧 session 失效、生成新 session，否则会话固定攻击有机可乘。</li>
+        <li>会话 Cookie 一律加 <code class="inline">Secure</code>、<code class="inline">HttpOnly</code>，能加 <code class="inline">SameSite</code> 就加，命名尽量带 <code class="inline">__Host-</code> 前缀。</li>
+        <li>只要用 Cookie 做认证，就必须显式防 CSRF——不要以为同源策略已经帮你挡住了跨站请求本身，它只挡住了"读响应"。</li>
+        <li>涉及机密值比较的地方一律用常数时间比较函数，普通的 <code class="inline">==</code> 会给时序攻击留后门。</li>
+      </ul>
+    </div>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch03/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 3 章：为 Natter API 加固安全</span></a>
+      <a class="next" href="../ch05/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 5 章：现代化的基于 Token 的认证 →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

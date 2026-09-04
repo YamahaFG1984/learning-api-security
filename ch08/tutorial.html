@@ -1,0 +1,1046 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 8 章：基于身份的访问控制 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">8.1 用户与组</a>
+      <a href="#s1a">8.1.1 LDAP 组</a>
+      <a href="#s2">8.2 基于角色的访问控制</a>
+      <a href="#s2a">8.2.1 角色映射到权限</a>
+      <a href="#s2b">8.2.2 静态角色</a>
+      <a href="#s2c">8.2.3 确定用户角色</a>
+      <a href="#s2d">8.2.4 动态角色</a>
+      <a href="#s3">8.3 基于属性的访问控制</a>
+      <a href="#s3a">8.3.1 合并多个决策</a>
+      <a href="#s3b">8.3.2 实现 ABAC 决策</a>
+      <a href="#s3c">8.3.3 策略代理与 API 网关</a>
+      <a href="#s3d">8.3.4 分布式策略与 XACML</a>
+      <a href="#s3e">8.3.5 ABAC 最佳实践</a>
+      <a href="#s4">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 8 章</span>
+    <h1>基于身份的访问控制</h1>
+    <p class="subtitle">当访问控制列表（ACL）膨胀到几十万条时，该怎么给权限"分类打包"？</p>
+
+    <p>想象你在管理一栋写字楼的门禁系统。最原始的做法是给每个员工、每一扇门单独登记一条"谁能进哪扇门"的记录——这就是第 3 章讲过的访问控制列表（ACL）。公司只有十个人、五扇门的时候这毫无问题，可一旦公司涨到一千人、一百个房间，你要维护的记录就变成了十万条，而且每次有人离职、换部门，你都要在这堆记录里逐条修改。现实中更常见的做法是"分类管理"：把员工划进"财务部""研发部"这样的组，或者干脆给一个人发一张写着"经理"字样的门禁卡，保安只看卡上的头衔而不用记住这个人到底是谁。</p>
+
+    <p>这一章要讲的，就是 API 世界里这几种"分类打包"权限的方式：把用户组织成<strong>组（group）</strong>，用<strong>基于角色的访问控制（RBAC）</strong>把权限打包成"角色"再发给用户，以及更进一步、能结合时间、地点等上下文动态裁决的<strong>基于属性的访问控制（ABAC）</strong>。它们都属于同一个大类——<strong>基于身份的访问控制（IBAC，Identity-Based Access Control）</strong>：先确认"你是谁"，再根据"你是谁"来判断你能做什么。第 9 章会介绍不依赖身份、而是依赖"你手里有什么凭证"的另一套思路。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 IBAC（基于身份的访问控制）</div>
+      <p>API 先认证请求者的身份（用户名、JWT 里的 subject 等），再查这个身份被授予了哪些权限，最后决定放行还是拒绝。本章讲的组、角色、属性，都是"把权限组织起来再关联到身份"的不同方式，核心步骤永远是"认证 → 查身份对应的权限 → 裁决"。</p>
+    </div>
+
+    <h2 id="s1"><span class="num">8.1</span>用户与组</h2>
+    <p>最直接的简化办法是把相关的用户收进一个"组"里，权限不再直接发给某个人，而是发给组。组和用户之间是<strong>多对多</strong>的关系：一个用户可以属于多个组（比如同时是"研发部"和"项目经理"），一个组也可以包含很多用户；如果组的成员本身允许是"主体（subject）"——也就是用户或者别的组，那组还可以嵌套组，形成层级结构，比如"项目经理组"整体作为"员工组"的成员。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 220" role="img" aria-label="用户与组的多对多关系图">
+        <defs>
+          <marker id="arrowA" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="220" y="15" width="200" height="42" rx="8" fill="#2563eb"/>
+        <text x="320" y="41" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">主体 Subject（用户或组）</text>
+
+        <rect x="60" y="150" width="170" height="46" rx="8" fill="#2563eb"/>
+        <text x="145" y="178" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">用户 User（如 alice）</text>
+
+        <rect x="410" y="150" width="170" height="46" rx="8" fill="#7c3aed"/>
+        <text x="495" y="178" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">组 Group（如 moderators）</text>
+
+        <line x1="280" y1="57" x2="165" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="185" y="105" text-anchor="middle" font-size="12" fill="#1c2333">是一种</text>
+
+        <line x1="360" y1="57" x2="475" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="455" y="105" text-anchor="middle" font-size="12" fill="#1c2333">是一种</text>
+
+        <path d="M 460 150 C 400 90 380 60 400 57" fill="none" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="330" y="88" text-anchor="middle" font-size="11.5" fill="#1c2333">组的成员也可以是组（可嵌套）</text>
+
+        <line x1="230" y1="165" x2="410" y2="165" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <line x1="410" y1="185" x2="230" y2="185" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowA)"/>
+        <text x="320" y="145" text-anchor="middle" font-size="12" fill="#1c2333">成员关系（多对多）</text>
+      </svg>
+      <figcaption>图 8-1：主体既可以是用户，也可以是组；组和用户是多对多的成员关系，组还能嵌套组</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>用户 User</span>
+        <span><span class="dot" style="background:#7c3aed"></span>组 Group</span>
+      </div>
+    </figure>
+
+    <p>组最大的好处是：新员工入职时，你只需要把他加进"软件工程师"组，而不用逐条回忆他需要哪些权限；他换岗位时，把他从旧组移出、塞进新组即可。要在 Natter 的数据库里实现"组"，只需要一张记录成员关系的表：</p>
+
+    <pre class="plain"><code>CREATE TABLE group_members(
+    group_id VARCHAR(30),
+    user_id VARCHAR(30) REFERENCES users(user_id)
+);
+CREATE INDEX group_member_user_idx ON group_members(user_id);</code></pre>
+
+    <p>用户登录成功之后，就可以顺便查一下他属于哪些组，把结果作为一个新的请求属性存起来，后面的访问控制逻辑随时可以取用。这一步很关键——书里特别强调：<strong>认证阶段该收集的用户属性（比如组），一定要在认证阶段就收集好</strong>，而不要在鉴权阶段临时又发起一次身份相关的查询，否则一旦以后把认证换成 LDAP 或 OpenID Connect（组信息会随着 ID Token 一起下发），你的鉴权逻辑就得跟着大改。</p>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 认证和鉴权要分层</div>
+      <p>把"查用户属于哪些组"和"判断这些组有没有权限"揉进同一条 SQL 当然更省一次查询，但这样做违反了认证与鉴权的分层原则：鉴权逻辑不应该关心属性是从数据库表查出来的还是从 LDAP、JWT 里读出来的。分开两步，即使以后换了身份来源，鉴权代码也完全不用动。</p>
+    </div>
+
+    <h3 id="s1a">8.1.1 LDAP 组</h3>
+    <p>大公司通常用一个中央目录服务——LDAP（轻量级目录访问协议）——统一管理全公司的用户，LDAP 天生就支持组的概念，分两种：<strong>静态组</strong>（<code>groupOfNames</code>，显式列出每个成员的 <code>member</code> 属性）和<strong>动态组</strong>（<code>groupOfURLs</code>，成员由一条 LDAP 搜索条件动态算出）。要查一个用户属于哪些静态组，本质上是拿这个用户的"专有名称"（distinguished name，DN）去搜所有 <code>member</code> 属性等于它的组条目。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 800 320" role="img" aria-label="通过 LDAP 认证并查询用户所属组的时序图">
+        <defs>
+          <marker id="arrowB" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="150" height="38" rx="8" fill="#2563eb"/>
+        <text x="95" y="34" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+        <rect x="330" y="10" width="160" height="38" rx="8" fill="#16a34a"/>
+        <text x="410" y="34" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+        <rect x="610" y="10" width="170" height="38" rx="8" fill="#0891b2"/>
+        <text x="695" y="34" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">LDAP 目录</text>
+
+        <line x1="95" y1="48" x2="95" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="410" y1="48" x2="410" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="695" y1="48" x2="695" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="100" y1="90" x2="405" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="250" y="82" text-anchor="middle" font-size="11.5" fill="#1c2333">① Authorization: Basic base64(alice:密码)</text>
+
+        <line x1="415" y1="132" x2="690" y2="132" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="552" y="124" text-anchor="middle" font-size="11.5" fill="#1c2333">② bind(uid=alice,ou=people,dc=example,dc=com, 密码)</text>
+
+        <line x1="690" y1="174" x2="415" y2="174" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="552" y="166" text-anchor="middle" font-size="11.5" fill="#1c2333">③ 绑定成功（密码正确，身份验证通过）</text>
+
+        <line x1="415" y1="216" x2="690" y2="216" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="552" y="208" text-anchor="middle" font-size="11" fill="#1c2333">④ search: (&amp;(objectClass=groupOfNames)(member={0}))</text>
+
+        <line x1="690" y1="258" x2="415" y2="258" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="552" y="250" text-anchor="middle" font-size="11.5" fill="#1c2333">⑤ 返回匹配组的 cn 属性：[moderators, employees]</text>
+
+        <line x1="405" y1="290" x2="100" y2="290" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="250" y="282" text-anchor="middle" font-size="11.5" fill="#1c2333">⑥ 200 OK（后续按 groups 属性做权限判断）</text>
+      </svg>
+      <figcaption>图 8-2：LdapUserController 先用用户自己的密码 bind 验证身份，再用一个专门的服务账号连接去搜索该用户所在的组</figcaption>
+    </figure>
+
+    <p>注意第 ④ 步的搜索过滤条件里用的是 <code>{0}</code> 占位符，而不是直接把用户名拼进字符串——这是为了避免 <strong>LDAP 注入</strong>：如果直接拼接，攻击者在用户名里塞入 <code>*)(uid=*</code> 这样的 LDAP 特殊字符，就可能让搜索条件的语义被篡改，搜出不该搜到的条目，原理和 SQL 注入完全一致（第 2 章）。JNDI 提供的参数化搜索会自动帮你转义这些特殊字符。</p>
+
+    <div class="callout danger">
+      <div class="title">🚨 LDAP 注入长什么样</div>
+      <p>假设过滤条件被拼成 <code>(&amp;(objectClass=groupOfNames)(member=uid=USERNAME,...))</code>，如果 USERNAME 直接来自用户输入且没有转义，攻击者输入 <code>*)(member=*</code> 之类的字符串就可能让查询匹配到所有组，从而伪造出自己属于 admins 组的假象。永远用库提供的参数化接口，绝不要手工拼接目录查询字符串。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch08/.../controller/LdapUserController.java（节选）</div>
+        <pre><code>public void authenticate(Request request, Response response) {
+    var credentials = getCredentials(request);
+    if (credentials == null) return;
+
+    var username = credentials[0];
+    var password = credentials[1];
+    var dn = "uid=" + username + ",ou=people," + baseDn;
+
+    try {
+        var directory = bind(dn, password);   // 用用户自己的密码验证身份
+        request.attribute("subject", username);
+        directory.close();
+
+        // 用预先建立好的服务账号连接去搜索该用户所在的组
+        var searchControls = new SearchControls();
+        searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+        searchControls.setReturningAttributes(new String[] { "cn" });
+
+        var groups = new ArrayList&lt;String&gt;();
+        var results = connection.search("ou=groups," + baseDn,
+                "(&amp;(objectClass=groupOfNames)(member={0}))",
+                new Object[]{ dn },              // 参数化，避免 LDAP 注入
+                searchControls);
+        while (results.hasMore()) {
+            var result = results.next();
+            groups.add((String) result.getAttributes()
+                .get("cn").get(0));
+        }
+        request.attribute("groups", groups);
+    } catch (AuthenticationException e) {
+        // 密码错误，不设置 subject，视为未认证
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">settings.py（django-auth-ldap，教学示例）</div>
+        <pre><code># settings.py
+import ldap
+from django_auth_ldap.config import LDAPSearch, GroupOfNamesType
+
+AUTHENTICATION_BACKENDS = [
+    "django_auth_ldap.backend.LDAPBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
+AUTH_LDAP_SERVER_URI = "ldaps://ldap.example.com"
+AUTH_LDAP_BIND_DN = "cn=natter-service,dc=example,dc=com"
+AUTH_LDAP_BIND_PASSWORD = env("LDAP_BIND_PASSWORD")
+
+# 用用户自己输入的用户名/密码去 bind，等价于 Java 版的 bind(dn, password)
+AUTH_LDAP_USER_SEARCH = LDAPSearch(
+    "ou=people,dc=example,dc=com",
+    ldap.SCOPE_SUBTREE, "(uid=%(user)s)",
+)
+
+# 登录成功后自动搜索 groupOfNames，等价于 Java 版的 connection.search(...)
+AUTH_LDAP_GROUP_SEARCH = LDAPSearch(
+    "ou=groups,dc=example,dc=com",
+    ldap.SCOPE_SUBTREE, "(objectClass=groupOfNames)",
+)
+AUTH_LDAP_GROUP_TYPE = GroupOfNamesType(name_attr="cn")
+
+# 把 LDAP 组自动同步成 Django 的 auth.Group，
+# 之后可以直接用 request.user.groups.filter(name="moderators")
+AUTH_LDAP_MIRROR_GROUPS = True</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/ldapAuth.ts（ldapjs，教学示例）</div>
+        <pre><code>import { Client } from "ldapjs";
+import type { MiddlewareHandler } from "hono";
+
+export const ldapAuth: MiddlewareHandler = async (c, next) => {
+  const auth = c.req.header("Authorization");
+  if (!auth?.startsWith("Basic ")) return c.text("Unauthorized", 401);
+  const [username, password] = atob(auth.slice(6)).split(":");
+  const userDn = `uid=${username},ou=people,dc=example,dc=com`;
+
+  // 用用户自己的密码 bind，验证身份
+  const userClient = new Client({ url: process.env.LDAP_URL! });
+  await new Promise((resolve, reject) =>
+    userClient.bind(userDn, password, (err) => (err ? reject(err) : resolve(null)))
+  );
+  userClient.unbind();
+
+  // 用服务账号连接搜索该用户所在的组（filter 参数会被 ldapjs 转义，避免注入）
+  const svcClient = new Client({ url: process.env.LDAP_URL! });
+  await new Promise((resolve, reject) =>
+    svcClient.bind(process.env.LDAP_BIND_DN!, process.env.LDAP_BIND_PW!,
+      (err) => (err ? reject(err) : resolve(null)))
+  );
+
+  const groups: string[] = [];
+  svcClient.search("ou=groups,dc=example,dc=com", {
+    filter: `(&amp;(objectClass=groupOfNames)(member=${userDn}))`,
+    scope: "sub", attributes: ["cn"],
+  }, (err, res) => {
+    res.on("searchEntry", (entry) => groups.push(String(entry.attributes[0].values[0])));
+    res.on("end", () => svcClient.unbind());
+  });
+
+  c.set("subject", username);
+  c.set("groups", groups);
+  await next();
+};</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ 小贴士</div>
+      <p>很多目录服务器还提供一个非标准的"虚拟属性"（常叫 <code>isMemberOf</code>），直接挂在用户条目上、由服务器自动维护，比每次都发起一次组搜索快得多；如果要频繁查组，也可以把结果短时间缓存起来，减轻目录服务器的压力。</p>
+    </div>
+
+    <h2 id="s2"><span class="num">8.2</span>基于角色的访问控制</h2>
+    <p>组能让管理用户更轻松，但没有完全解决问题：大多数组系统仍然允许给单个用户直接发权限，你想弄清楚"谁能干什么"，还是得把每个用户的权限和他所在的每个组的权限都翻一遍；而且组往往是全公司统一定义的（LDAP 里可能只有一个笼统的"软件工程师"组），未必贴合某个具体 API 的权限颗粒度需求。<strong>基于角色的访问控制（RBAC）</strong>在用户和权限之间插入了一层新的间接层——角色：权限不再直接发给用户或组，而是发给角色，用户再被分配到角色。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 310" role="img" aria-label="RBAC 角色到权限的映射图">
+        <defs>
+          <marker id="arrowC" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="130" width="110" height="44" rx="8" fill="#2563eb"/>
+        <text x="75" y="157" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">用户</text>
+
+        <rect x="190" y="10" width="170" height="44" rx="8" fill="#16a34a"/>
+        <text x="275" y="37" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">owner 角色</text>
+        <rect x="190" y="88" width="170" height="44" rx="8" fill="#16a34a"/>
+        <text x="275" y="115" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">moderator 角色</text>
+        <rect x="190" y="166" width="170" height="44" rx="8" fill="#16a34a"/>
+        <text x="275" y="193" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">member 角色</text>
+        <rect x="190" y="244" width="170" height="44" rx="8" fill="#16a34a"/>
+        <text x="275" y="271" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">observer 角色</text>
+
+        <rect x="500" y="10" width="140" height="44" rx="8" fill="#7c3aed"/>
+        <text x="570" y="37" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">r, w, d</text>
+        <rect x="500" y="88" width="140" height="44" rx="8" fill="#7c3aed"/>
+        <text x="570" y="115" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">r, d</text>
+        <rect x="500" y="166" width="140" height="44" rx="8" fill="#7c3aed"/>
+        <text x="570" y="193" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">r, w</text>
+        <rect x="500" y="244" width="140" height="44" rx="8" fill="#7c3aed"/>
+        <text x="570" y="271" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">r</text>
+
+        <line x1="130" y1="152" x2="190" y2="32" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="130" y1="152" x2="190" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="130" y1="152" x2="190" y2="188" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="130" y1="152" x2="190" y2="266" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <text x="150" y="215" text-anchor="middle" font-size="11.5" fill="#1c2333">分配角色</text>
+        <text x="150" y="230" text-anchor="middle" font-size="10.5" fill="#5b6478">（user_roles 表）</text>
+
+        <line x1="360" y1="32" x2="500" y2="32" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="360" y1="110" x2="500" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="360" y1="188" x2="500" y2="188" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="360" y1="266" x2="500" y2="266" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <text x="430" y="70" text-anchor="middle" font-size="11.5" fill="#1c2333">角色授予固定权限</text>
+        <text x="430" y="83" text-anchor="middle" font-size="10.5" fill="#5b6478">（role_permissions 表）</text>
+      </svg>
+      <figcaption>图 8-3：权限不再直接发给用户，而是先打包成角色；用户只需要被分配一个角色</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>用户</span>
+        <span><span class="dot" style="background:#16a34a"></span>角色</span>
+        <span><span class="dot" style="background:#7c3aed"></span>权限（r=读 w=写 d=删除）</span>
+      </div>
+    </figure>
+
+    <p>这样做的好处很直接：给某人"moderator"这个称呼，比让所有人都记住"moderator 具体能读、能删、不能写"要简单得多；以后想调整 moderator 的权限，也只需要改一处角色定义，不用挨个改用户或组的权限记录。RBAC 和组虽然在数学上能互相模拟，但实践中差异明显：组主要用来组织<strong>用户</strong>，角色主要用来组织<strong>权限</strong>；组往往是全公司统一定义的，角色通常是某个 API 自己定义的；大多数 RBAC 系统不允许绕过角色直接给用户发权限，这让"谁能干什么"变得容易审计；角色的定义（哪个角色有哪些权限）和角色的分配（谁拥有哪个角色）也是分开管理的，这是一种有效的职责分离。</p>
+
+    <h3 id="s2a">8.2.1 角色映射到权限</h3>
+    <p>把角色落到具体权限上，通常有两种做法。第一种是彻底抛弃"权限"这个概念，直接在每个 API 操作上标注允许调用的角色——Java EE / JAX-RS 就是这么做的，用 <code>@RolesAllowed("moderator")</code> 这样的注解描述限制。这种方式简单直接，但把角色和代码耦合死了，改角色要改代码重新发布。</p>
+
+    <div class="callout note">
+      <div class="title">💡 顺带一提：注解式角色（Natter 未采用）</div>
+      <p>Java EE 风格大致是这样：<code>@RolesAllowed({"owner", "moderator"}) public Response listMembers() { … }</code>。Natter 项目没有引入 JAX-RS，所以这里只作为对照思路介绍，不再单独展开三栏代码对比。</p>
+    </div>
+
+    <p>Natter 采用的是第二种做法：保留显式的权限字符（<code>r</code>/<code>w</code>/<code>d</code>），额外建一张表把角色映射到权限组合，这样管理员也能在不碰代码的情况下审查"这个角色到底能干什么"：</p>
+
+    <pre class="plain"><code>CREATE TABLE role_permissions(
+    role_id VARCHAR(30) NOT NULL PRIMARY KEY,
+    perms VARCHAR(3) NOT NULL
+);
+INSERT INTO role_permissions(role_id, perms)
+    VALUES ('owner', 'rwd'),
+           ('moderator', 'rd'),
+           ('member', 'rw'),
+           ('observer', 'r');
+GRANT SELECT ON role_permissions TO natter_api_user;</code></pre>
+
+    <table>
+      <thead><tr><th>角色</th><th>权限位</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>owner</td><td>r, w, d</td><td>社交空间的创建者，读写删全权限</td></tr>
+        <tr><td>moderator</td><td>r, d</td><td>可以读帖、删除违规帖子，但不能自己发帖</td></tr>
+        <tr><td>member</td><td>r, w</td><td>普通成员，可以读帖发帖，不能删帖</td></tr>
+        <tr><td>observer</td><td>r</td><td>只能看，不能发言</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="s2b">8.2.2 静态角色</h3>
+    <p>决定了角色对应什么权限之后，还要决定"哪个用户拥有哪个角色"，最常见的做法是静态配置——加一张表把某个用户在某个社交空间里的角色记下来。因为 Natter 的角色是限定在单个社交空间内的（一个空间的 owner 管不了另一个空间），所以主键是 <code>(space_id, user_id)</code>：</p>
+
+    <pre class="plain"><code>CREATE TABLE user_roles(
+    space_id INT NOT NULL REFERENCES spaces(space_id),
+    user_id VARCHAR(30) NOT NULL REFERENCES users(user_id),
+    role_id VARCHAR(30) NOT NULL REFERENCES role_permissions(role_id),
+);
+CREATE INDEX user_roles_idx ON user_roles(space_id, user_id);</code></pre>
+
+    <div class="callout note">
+      <div class="title">💡 什么是安全域（realm）</div>
+      <p>当用户、组或角色的作用范围被限定在应用的某个子集内（比如"这个角色只在这一个社交空间里有效"），这个子集就叫一个<strong>安全域</strong>。Natter 里每个社交空间就是一个独立的安全域。</p>
+    </div>
+
+    <p>创建社交空间时，创建者会被自动授予该空间里的全部角色；邀请新成员加入时，请求里带上想给对方的角色，服务端要先校验这是不是一个合法角色名，再写入 <code>user_roles</code> 表。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch08/.../controller/SpaceController.java（节选）</div>
+        <pre><code>private static final Set&lt;String&gt; DEFINED_ROLES =
+        Set.of("owner", "moderator", "member", "observer");
+
+public JSONObject addMember(Request request, Response response) {
+  var json = new JSONObject(request.body());
+  var spaceId = Long.parseLong(request.params(":spaceId"));
+  var userToAdd = json.getString("username");
+  var roles = json.optJSONArray("roles");
+  if (roles == null) {
+    roles = new JSONArray().put("member");     // 默认给 member 角色
+  }
+  if (!DEFINED_ROLES.containsAll(roles.toList())) {
+    throw new IllegalArgumentException("invalid role");
+  }
+  for (var role : roles.toList()) {
+    database.updateUnique(
+            "INSERT INTO user_roles(space_id, user_id, role_id)" +
+                    " VALUES(?, ?, ?)", spaceId, userToAdd, role);
+  }
+  response.status(200);
+  return new JSONObject()
+          .put("username", userToAdd)
+          .put("roles", roles);
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">models.py / views.py（Django，教学示例）</div>
+        <pre><code># models.py
+class SpaceMembership(models.Model):
+    ROLE_CHOICES = [
+        ("owner", "owner"), ("moderator", "moderator"),
+        ("member", "member"), ("observer", "observer"),
+    ]
+    space = models.ForeignKey("Space", on_delete=models.CASCADE)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="member")
+
+    class Meta:
+        unique_together = ("space", "user")
+
+# views.py
+class AddMemberView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, space_id):
+        username = request.data["username"]
+        role = request.data.get("role", "member")
+        if role not in dict(SpaceMembership.ROLE_CHOICES):
+            raise ValidationError("invalid role")
+
+        user = User.objects.get(username=username)
+        SpaceMembership.objects.update_or_create(
+            space_id=space_id, user=user, defaults={"role": role})
+        return Response({"username": username, "role": role})</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/spaces.ts（Hono + drizzle-orm，教学示例）</div>
+        <pre><code>const DEFINED_ROLES = new Set(["owner", "moderator", "member", "observer"]);
+
+app.post("/spaces/:spaceId/members", async (c) => {
+  const spaceId = Number(c.req.param("spaceId"));
+  const { username, role = "member" } = await c.req.json();
+
+  if (!DEFINED_ROLES.has(role)) {
+    return c.json({ error: "invalid role" }, 400);
+  }
+
+  await db.insert(userRoles).values({
+    spaceId,
+    userId: username,
+    roleId: role,
+  });
+
+  return c.json({ username, role });
+});</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s2c">8.2.3 确定用户角色</h3>
+    <p>请求进来之后，要先查这个用户在当前空间里的角色，再查该角色对应哪些权限，最后才能判断这次操作是否被允许。因为角色高度绑定具体 API（不像组那样在认证阶段就能拿到），Natter 把"角色 → 权限"这两步查询合并成一条 SQL，放进一个独立的 <code>lookupPermissions</code> 过滤器里，在真正的权限校验之前先跑一遍、把结果缓存进请求属性，避免同一个请求里的多次权限检查重复查库。这也正是实现"只有 moderator 才能删帖"这类静态角色规则的地方：删除操作要求权限位包含 <code>d</code>，而只有 owner 和 moderator 的角色对应的 <code>perms</code> 里带 <code>d</code>。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch08/.../controller/UserController.java（节选）</div>
+        <pre><code>public void lookupPermissions(Request request, Response response) {
+    requireAuthentication(request, response);
+    var spaceId = Long.parseLong(request.params(":spaceId"));
+    var username = (String) request.attribute("subject");
+
+    var query = new QueryBuilder(
+            "SELECT rp.perms " +
+                    "  FROM role_permissions rp JOIN user_roles ur" +
+                    "    ON rp.role_id = ur.role_id" +
+                    " WHERE ur.space_id = ? AND ur.user_id = ?",
+            spaceId, username);
+
+    var perms = String.join("",
+            database.findAll(String.class, query.build()));
+    request.attribute("perms", perms);      // 存进请求属性，避免重复查库
+}
+
+public Filter requirePermission(String method, String permission) {
+    return (request, response) -> {
+        if (!method.equalsIgnoreCase(request.requestMethod())) {
+            return;
+        }
+        var perms = request.&lt;String&gt;attribute("perms");
+        if (!perms.contains(permission)) {
+            halt(403);
+        }
+    };
+}
+
+// Main.java 里的路由装配：
+// before("/spaces/:spaceId/messages/*", userController::lookupPermissions);
+// before("/spaces/:spaceId/messages/*", userController.requirePermission("DELETE", "d"));
+// delete("/spaces/:spaceId/messages/:msgId", moderatorController::deletePost);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">permissions.py / views.py（DRF，教学示例）</div>
+        <pre><code># permissions.py
+ROLE_PERMS = {"owner": "rwd", "moderator": "rd", "member": "rw", "observer": "r"}
+
+class HasSpacePermission(BasePermission):
+    required = "r"   # 子类覆盖，例如删除接口要求 "d"
+
+    def has_permission(self, request, view):
+        space_id = view.kwargs["space_id"]
+        try:
+            membership = SpaceMembership.objects.get(
+                space_id=space_id, user=request.user)
+        except SpaceMembership.DoesNotExist:
+            return False
+        return self.required in ROLE_PERMS[membership.role]
+
+class CanDeleteMessage(HasSpacePermission):
+    required = "d"   # 只有 owner / moderator 的角色带 'd'
+
+# views.py —— 对应“只有 moderator 才能删帖”
+class MessageDetailView(APIView):
+    permission_classes = [IsAuthenticated, CanDeleteMessage]
+
+    def delete(self, request, space_id, msg_id):
+        Message.objects.filter(space_id=space_id, msg_id=msg_id).delete()
+        return Response(status=200)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/middleware/requireRole.ts（Hono，教学示例）</div>
+        <pre><code>const ROLE_PERMS: Record&lt;string, string&gt; = {
+  owner: "rwd", moderator: "rd", member: "rw", observer: "r",
+};
+
+export function requirePermission(perm: "r" | "w" | "d"): MiddlewareHandler {
+  return async (c, next) => {
+    const spaceId = Number(c.req.param("spaceId"));
+    const username = c.get("subject");
+
+    const row = await db.query.userRoles.findFirst({
+      where: and(eq(userRoles.spaceId, spaceId), eq(userRoles.userId, username)),
+    });
+    if (!row || !ROLE_PERMS[row.roleId].includes(perm)) {
+      return c.text("Forbidden", 403);
+    }
+    await next();
+  };
+}
+
+// routes/messages.ts —— “只有 moderator（或 owner）才能删帖”
+app.delete(
+  "/spaces/:spaceId/messages/:msgId",
+  requirePermission("d"),
+  async (c) => { /* 执行删除 */ }
+);</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s2d">8.2.4 动态角色</h3>
+    <p>静态角色分配最常见，但有些系统支持更灵活的动态角色：比如呼叫中心的客服只在自己排班的时间段内才被授予"可以访问客户档案"的角色，下班之后角色自动失效。动态角色目前没有统一标准，通常靠数据库查询或者 Prolog、OWL 这类逻辑规则来实现。当你发现需要的规则已经不只是"给谁发了什么角色"这么简单，而是要结合时间、地点等上下文时，就该考虑下一节的 ABAC 了。</p>
+
+    <h2 id="s3"><span class="num">8.3</span>基于属性的访问控制</h2>
+    <p>RBAC 已经能覆盖大多数场景，但有些策略天生就没法用静态角色表达。还是呼叫中心的例子：除了要求客服在排班时间内，你可能还想要求客服<strong>当前正在和这个客户通话</strong>才能看他的档案——客户是谁，可能是通过来电号码或者客户在按键菜单里输入的账号动态判断出来的，而且理想情况下应该只放行"通话期间 + 通话结束后 5 分钟"这个窗口，这比任何静态角色都精细得多，也更贴近最小权限原则。</p>
+
+    <p><strong>ABAC（基于属性的访问控制）</strong>就是为了应对这种动态场景而生的：每次请求都实时收集一组属性，分成四大类——主体（发起请求的用户，比如用户名、所属组）、资源（被访问的对象，比如 URI、密级标签）、操作（比如 HTTP 方法）、环境（比如时间、IP 地址）——喂给策略引擎，引擎给出允许或拒绝的裁决。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 430" role="img" aria-label="ABAC 属性收集、规则评估与决策合并示意图">
+        <defs>
+          <marker id="arrowD" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+
+        <rect x="10" y="20" width="150" height="42" rx="8" fill="#2563eb"/>
+        <text x="85" y="46" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">主体 Subject</text>
+        <rect x="195" y="20" width="150" height="42" rx="8" fill="#7c3aed"/>
+        <text x="270" y="46" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">资源 Resource</text>
+        <rect x="380" y="20" width="150" height="42" rx="8" fill="#16a34a"/>
+        <text x="455" y="46" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">操作 Action</text>
+        <rect x="565" y="20" width="150" height="42" rx="8" fill="#0891b2"/>
+        <text x="640" y="46" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">环境 Environment</text>
+
+        <line x1="85" y1="62" x2="230" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <line x1="270" y1="62" x2="290" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <line x1="455" y1="62" x2="430" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <line x1="640" y1="62" x2="490" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+        <rect x="210" y="110" width="300" height="50" rx="8" fill="#d97706"/>
+        <text x="360" y="130" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">ABAC 规则引擎</text>
+        <text x="360" y="147" text-anchor="middle" fill="#fff" font-size="11">（Drools / 自定义策略函数）</text>
+
+        <line x1="280" y1="160" x2="205" y2="200" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <line x1="440" y1="160" x2="515" y2="200" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+        <rect x="70" y="200" width="270" height="44" rx="8" fill="#dc2626"/>
+        <text x="205" y="219" text-anchor="middle" fill="#fff" font-size="10.5" font-weight="600">规则 A：method=DELETE 且不在</text>
+        <text x="205" y="233" text-anchor="middle" fill="#fff" font-size="10.5" font-weight="600">9~17 点内 → deny()</text>
+
+        <rect x="380" y="200" width="270" height="44" rx="8" fill="#16a34a"/>
+        <text x="515" y="226" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">规则 B（默认兜底）→ permit()</text>
+
+        <line x1="205" y1="244" x2="280" y2="290" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <line x1="515" y1="244" x2="440" y2="290" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+        <rect x="210" y="290" width="300" height="54" rx="8" fill="#d97706"/>
+        <text x="360" y="310" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">合并逻辑（deny 优先于 permit）：</text>
+        <text x="360" y="327" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">只要有一条规则 deny()，最终结果就是 deny</text>
+
+        <line x1="280" y1="344" x2="200" y2="380" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <line x1="440" y1="344" x2="520" y2="380" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD)"/>
+        <text x="190" y="365" text-anchor="middle" font-size="10.5" fill="#1c2333">无 deny</text>
+        <text x="530" y="365" text-anchor="middle" font-size="10.5" fill="#1c2333">存在 deny</text>
+
+        <rect x="120" y="380" width="160" height="42" rx="8" fill="#16a34a"/>
+        <text x="200" y="406" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">允许 Permit</text>
+        <rect x="440" y="380" width="160" height="42" rx="8" fill="#dc2626"/>
+        <text x="520" y="406" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">拒绝 Deny</text>
+      </svg>
+      <figcaption>图 8-4：四类属性喂给规则引擎，多条规则各自给出 permit/deny，按"默认允许、deny 优先"的策略合并成最终裁决</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>主体属性</span>
+        <span><span class="dot" style="background:#7c3aed"></span>资源属性</span>
+        <span><span class="dot" style="background:#16a34a"></span>操作属性 / 允许</span>
+        <span><span class="dot" style="background:#0891b2"></span>环境属性</span>
+        <span><span class="dot" style="background:#d97706"></span>规则引擎 / 合并逻辑</span>
+        <span><span class="dot" style="background:#dc2626"></span>deny 规则 / 拒绝</span>
+      </div>
+    </figure>
+
+    <p>下面是 Natter 里收集属性、触发裁决的代码：一个 Spark 过滤器把请求里能拿到的信息按四类打包，交给一个抽象方法 <code>checkPermitted</code> 去评估，如果结果是"不允许"就直接 403。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch08/.../controller/ABACAccessController.java</div>
+        <pre><code>public abstract class ABACAccessController {
+
+    public void enforcePolicy(Request request, Response response) {
+        var subjectAttrs = new HashMap&lt;String, Object&gt;();
+        subjectAttrs.put("user", request.attribute("subject"));
+        subjectAttrs.put("groups", request.attribute("groups"));
+
+        var resourceAttrs = new HashMap&lt;String, Object&gt;();
+        resourceAttrs.put("path", request.pathInfo());
+        resourceAttrs.put("space", request.params(":spaceId"));
+
+        var actionAttrs = new HashMap&lt;String, Object&gt;();
+        actionAttrs.put("method", request.requestMethod());
+
+        var envAttrs = new HashMap&lt;String, Object&gt;();
+        envAttrs.put("timeOfDay", LocalTime.now());
+        envAttrs.put("ip", request.ip());
+
+        var permitted = checkPermitted(subjectAttrs, resourceAttrs,
+                actionAttrs, envAttrs);
+        if (!permitted) {
+            halt(403);
+        }
+    }
+
+    abstract boolean checkPermitted(
+            Map&lt;String, Object&gt; subject, Map&lt;String, Object&gt; resource,
+            Map&lt;String, Object&gt; action, Map&lt;String, Object&gt; env);
+
+    public static class Decision {
+        private boolean permit = true;   // 默认允许
+        public void deny() { permit = false; }   // 显式拒绝会覆盖默认值
+        public void permit() { /* 显式允许被忽略，除非已经 deny */ }
+        boolean isPermitted() { return permit; }
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">policy/abac.py（教学示例）</div>
+        <pre><code>from datetime import datetime
+
+class Decision:
+    def __init__(self):
+        self.permit = True          # 默认允许
+
+    def deny(self):
+        self.permit = False         # deny 覆盖默认值
+
+    def permit_(self):
+        pass                        # 显式允许被忽略
+
+def gather_attributes(request, space_id):
+    return {
+        "subject": {
+            "user": request.user.username,
+            "groups": list(request.user.groups.values_list("name", flat=True)),
+        },
+        "resource": {"path": request.path, "space": space_id},
+        "action": {"method": request.method},
+        "environment": {"time": datetime.now().time(), "ip": request.META.get("REMOTE_ADDR")},
+    }
+
+class ABACMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        space_id = request.resolver_match.kwargs.get("space_id") if request.resolver_match else None
+        attrs = gather_attributes(request, space_id)
+        decision = Decision()
+        for rule in POLICY_RULES:      # 一组 (attrs, decision) -> None 的规则函数
+            rule(attrs, decision)
+        if not decision.permit:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        return self.get_response(request)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/policy/abac.ts（Hono，教学示例）</div>
+        <pre><code>interface Decision {
+  permit: boolean;
+  deny(): void;      // 覆盖默认值
+  permitExplicit(): void;  // 显式允许被忽略
+}
+
+function newDecision(): Decision {
+  return {
+    permit: true,
+    deny() { this.permit = false; },
+    permitExplicit() {},
+  };
+}
+
+export const enforcePolicy: MiddlewareHandler = async (c, next) => {
+  const subject = { user: c.get("subject"), groups: c.get("groups") };
+  const resource = { path: c.req.path, space: c.req.param("spaceId") };
+  const action = { method: c.req.method };
+  const environment = { timeOfDay: new Date(), ip: c.req.header("x-forwarded-for") };
+
+  const decision = newDecision();
+  for (const rule of policyRules) {
+    rule({ subject, resource, action, environment }, decision);
+  }
+
+  if (!decision.permit) return c.text("Forbidden", 403);
+  await next();
+};</code></pre>
+      </div>
+    </div>
+
+    <h3 id="s3a">8.3.1 合并多个决策</h3>
+    <p>一旦规则不止一条，就必然会遇到"没有规则命中怎么办"和"规则之间意见不一致怎么办"这两个问题。最安全的做法是<strong>默认拒绝</strong>：必须至少有一条规则明确允许、且没有任何规则拒绝，请求才能通过。但如果 ABAC 是叠加在已有的 RBAC/ACL 之上、只是想额外收紧一些边界场景，用<strong>默认允许 + deny 优先</strong>会更省事——这正是 Natter 采用的策略：所有请求默认放行，交给底层已经实现好的 RBAC 去把关，ABAC 规则只负责在特定条件下追加拒绝。上面 <code>Decision</code> 类的实现就是这个思路：<code>permit</code> 初始为 <code>true</code>，任何一次 <code>deny()</code> 调用都会把它扳成 <code>false</code> 且不可逆，而调用 <code>permit()</code> 什么也不做——因为"允许"本来就是默认值，真正有意义的只有"拒绝"这个动作。</p>
+
+    <h3 id="s3b">8.3.2 实现 ABAC 决策</h3>
+    <p>ABAC 规则直接写死在 Java 代码里当然可以，但业务规则一旦变复杂，用专门的规则引擎或 DSL（领域特定语言）来表达会清晰得多。本书用 Red Hat 的 <strong>Drools</strong> 规则引擎来实现，规则文件是独立的 <code>.drl</code> 文本，格式是"when（条件）… then（动作）…"，很像自然语言。Natter 用它加了一条书里没有在 RBAC 层面实现的规则：<strong>禁止 moderator 在非工作时间（9 点到 17 点之外）执行删除操作</strong>——哪怕这个人本来就有 <code>d</code> 权限。</p>
+
+    <div class="callout note">
+      <div class="title">💡 Drools 的工作方式</div>
+      <p>把各类属性对象"插入"到一次会话（KieSession）的工作内存里，规则引擎会自动尝试匹配每条规则的 <code>when</code> 部分；一旦某条规则的所有条件都满足，就会执行它的 <code>then</code> 部分。这里的规则文件里用了一个全局变量 <code>decision</code>，规则通过调用它的 <code>deny()</code>/<code>permit()</code> 来影响最终结果，和上一节的合并逻辑完全对应。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark + Drools（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· django-rules</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· 调用 OPA</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch08/.../controller/DroolsAccessController.java + src/main/resources/accessrules.drl</div>
+        <pre><code>// DroolsAccessController.java
+public class DroolsAccessController extends ABACAccessController {
+    private final KieContainer kieContainer;
+
+    public DroolsAccessController() {
+        this.kieContainer = KieServices.get().getKieClasspathContainer();
+    }
+
+    @Override
+    boolean checkPermitted(Map&lt;String, Object&gt; subject, Map&lt;String, Object&gt; resource,
+                           Map&lt;String, Object&gt; action, Map&lt;String, Object&gt; env) {
+        var session = kieContainer.newKieSession();
+        try {
+            var decision = new Decision();
+            session.setGlobal("decision", decision);
+            session.insert(new Subject(subject));
+            session.insert(new Resource(resource));
+            session.insert(new Action(action));
+            session.insert(new Environment(env));
+            session.fireAllRules();
+            return decision.isPermitted();
+        } finally {
+            session.dispose();
+        }
+    }
+    // Subject/Resource/Action/Environment 只是包了一层 HashMap，
+    // 方便 Drools 按类型匹配不同类别的属性
+}
+
+// accessrules.drl
+package com.manning.apisecurityinaction.rules;
+global Decision decision;
+
+rule "deny moderation outside office hours"
+    when
+        Action( this["method"] == "DELETE" )
+        Environment( this["timeOfDay"].hour &lt; 9
+            || this["timeOfDay"].hour &gt; 17 )
+    then
+        decision.deny();
+end</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">policy/rules.py（django-rules，教学示例）</div>
+        <pre><code>import rules
+from datetime import time
+
+@rules.predicate
+def is_delete(action):
+    return action["method"] == "DELETE"
+
+@rules.predicate
+def outside_office_hours(environment):
+    t = environment["time"]
+    return t &lt; time(9, 0) or t &gt; time(17, 0)
+
+# 等价于 Drools 规则里 when 部分的两个条件用 &amp;&amp; 连起来
+deny_moderation_outside_hours = is_delete &amp; outside_office_hours
+
+def rule_office_hours(attrs, decision):
+    if deny_moderation_outside_hours(
+        action=attrs["action"], environment=attrs["environment"]
+    ):
+        decision.deny()
+
+# 挂进 8.3.1 里定义的 POLICY_RULES 列表
+POLICY_RULES = [rule_office_hours]</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/policy/opa.ts + policy/authz.rego（Hono 调用 Open Policy Agent，教学示例）</div>
+        <pre><code>// src/policy/opa.ts —— Hono 端只负责把属性 POST 给 OPA，规则本身跑在 OPA 里
+export async function checkWithOPA(input: {
+  subject: object; resource: object; action: object; environment: object;
+}): Promise&lt;boolean&gt; {
+  const res = await fetch("http://opa:8181/v1/data/natter/authz/allow", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input }),
+  });
+  const { result } = await res.json();
+  return result === true;
+}
+
+export const enforcePolicy: MiddlewareHandler = async (c, next) => {
+  const allowed = await checkWithOPA({
+    subject: { user: c.get("subject"), groups: c.get("groups") },
+    resource: { path: c.req.path, space: c.req.param("spaceId") },
+    action: { method: c.req.method },
+    environment: { timeOfDay: new Date().toISOString(), ip: c.req.header("x-forwarded-for") },
+  });
+  if (!allowed) return c.text("Forbidden", 403);
+  await next();
+};
+
+/* policy/authz.rego —— 和左边 accessrules.drl 表达的是同一条规则
+package natter.authz
+default allow = true
+
+allow = false {
+  input.action.method == "DELETE"
+  hour := time.clock(time.parse_rfc3339_ns(input.environment.timeOfDay))[0]
+  hour_out_of_range(hour)
+}
+
+hour_out_of_range(h) { h &lt; 9 }
+hour_out_of_range(h) { h &gt; 17 }
+*/</code></pre>
+      </div>
+    </div>
+
+    <p>接下来只需要把 <code>DroolsAccessController</code> 作为一个全局的 <code>before("/*", …)</code> 过滤器挂在所有路由之前即可——即便某个 REST 端点根本没实现 DELETE 方法，规则依然会在请求匹配路由之前先跑一遍。测试的时候，只要把 <code>envAttrs.put("timeOfDay", LocalTime.now().withHour(23))</code> 这样人为改一下环境属性，就能在不改系统时钟的情况下验证"非工作时间拒绝删除"是否生效。</p>
+
+    <h3 id="s3c">8.3.3 策略代理与 API 网关</h3>
+    <p>规则一旦变多，散落在每个服务自己的代码里就很难统一管理，于是出现了专门的组件：<strong>策略代理（policy agent）</strong>以插件形式挂进已有的应用服务器、Web 服务器或反向代理；或者作为独立的<strong>网关</strong>拦截 HTTP 层的请求。比如 Open Policy Agent（OPA）就是用一种专门的 DSL（Rego）描述策略，既能作为 REST 服务被远程调用，也能作为 Go 库直接嵌入。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 300" role="img" aria-label="策略代理与 API 网关拦截请求做统一鉴权的架构图">
+        <defs>
+          <marker id="arrowE" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="270" y="10" width="160" height="42" rx="8" fill="#2563eb"/>
+        <text x="350" y="36" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+
+        <rect x="40" y="100" width="280" height="52" rx="8" fill="#d97706"/>
+        <text x="180" y="121" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">反向代理</text>
+        <text x="180" y="138" text-anchor="middle" fill="#fff" font-size="11">+ 策略代理 Policy Agent</text>
+
+        <rect x="380" y="100" width="280" height="52" rx="8" fill="#d97706"/>
+        <text x="520" y="121" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">API 网关</text>
+        <text x="520" y="138" text-anchor="middle" fill="#fff" font-size="11">+ 策略引擎 Policy Engine</text>
+
+        <rect x="210" y="205" width="280" height="52" rx="8" fill="#16a34a"/>
+        <text x="350" y="226" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">应用服务器</text>
+        <text x="350" y="243" text-anchor="middle" fill="#fff" font-size="11">+ 策略代理 + API</text>
+
+        <line x1="320" y1="52" x2="200" y2="100" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <line x1="380" y1="52" x2="500" y2="100" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <text x="350" y="78" text-anchor="middle" font-size="11.5" fill="#1c2333">客户端发起 HTTP 请求</text>
+
+        <line x1="220" y1="152" x2="300" y2="205" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <line x1="480" y1="152" x2="400" y2="205" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowE)"/>
+        <text x="350" y="182" text-anchor="middle" font-size="11.5" fill="#1c2333">策略检查通过后转发请求</text>
+      </svg>
+      <figcaption>图 8-5：策略代理可以挂在反向代理/应用服务器里，也可以做成独立的 API 网关，在请求真正到达业务代码前统一拦截鉴权</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>客户端</span>
+        <span><span class="dot" style="background:#d97706"></span>策略代理 / 策略引擎</span>
+        <span><span class="dot" style="background:#16a34a"></span>应用服务器 / API</span>
+      </div>
+    </figure>
+
+    <p>这一类架构最大的价值是把"鉴权"和"业务逻辑"彻底解耦：业务代码不用关心策略细节，安全团队也能独立于业务发布节奏去调整策略。本章不为这一层单独写三栏代码对比——它更多是部署形态和基础设施的选择，而不是某个 Web 框架内的具体写法；不管后端用 Spark、Django 还是 Hono，都可以把它放在同一个策略代理或网关后面。</p>
+
+    <h3 id="s3d">8.3.4 分布式策略与 XACML</h3>
+    <p>另一种思路是把策略定义完全集中到一台独立的策略服务器上，各个策略代理通过 REST API 向它请求裁决，这样安全团队就能在一个地方审查、调整全公司所有 API 的规则。这个方向最经典的标准是 <strong>XACML</strong>（eXtensible Access-Control Markup Language），它定义了一套基于 XML 的策略语言，虽然这套 XML 语法近年用得越来越少，但它定义的参考架构影响深远，被后续很多 ABAC 系统（包括 NIST 的建议）借鉴。</p>
+
+    <div class="callout note">
+      <div class="title">💡 XACML 的四个角色</div>
+      <p><strong>PEP（策略执行点）</strong>像门卫一样拦截请求，负责放行或拒绝；<strong>PDP（策略决策点）</strong>装着真正的规则引擎，负责给出裁决；<strong>PIP（策略信息点）</strong>负责从各种数据源取属性值并缓存；<strong>PAP（策略管理点）</strong>是给管理员用的策略编辑界面。四者可以部署在同一台机器上，也可以分布在不同服务里。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 400" role="img" aria-label="XACML 参考架构：PEP、PDP、PIP、PAP 的关系图">
+        <defs>
+          <marker id="arrowF" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="140" width="140" height="42" rx="8" fill="#2563eb"/>
+        <text x="90" y="166" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">客户端请求</text>
+
+        <rect x="220" y="140" width="150" height="42" rx="8" fill="#d97706"/>
+        <text x="295" y="166" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">PEP 策略执行点</text>
+
+        <rect x="430" y="140" width="120" height="42" rx="8" fill="#16a34a"/>
+        <text x="490" y="166" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">API</text>
+
+        <rect x="220" y="250" width="150" height="42" rx="8" fill="#16a34a"/>
+        <text x="295" y="276" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">PDP 策略决策点</text>
+
+        <rect x="430" y="250" width="150" height="42" rx="8" fill="#7c3aed"/>
+        <text x="505" y="276" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">PIP 策略信息点</text>
+
+        <rect x="20" y="250" width="150" height="42" rx="8" fill="#0891b2"/>
+        <text x="95" y="276" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">PAP 策略管理点</text>
+
+        <rect x="430" y="330" width="150" height="42" rx="8" fill="#7c3aed"/>
+        <text x="505" y="352" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">数据源</text>
+        <text x="505" y="366" text-anchor="middle" fill="#fff" font-size="10.5">(DB / UserInfo)</text>
+
+        <rect x="20" y="330" width="150" height="42" rx="8" fill="#2563eb"/>
+        <text x="95" y="356" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">安全管理员</text>
+
+        <line x1="160" y1="161" x2="220" y2="161" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="190" y="153" text-anchor="middle" font-size="10.5" fill="#1c2333">① 请求</text>
+
+        <line x1="370" y1="155" x2="430" y2="155" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="400" y="147" text-anchor="middle" font-size="10" fill="#1c2333">④ 放行</text>
+
+        <line x1="295" y1="182" x2="295" y2="250" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowF)" marker-end="url(#arrowF)"/>
+        <text x="345" y="210" text-anchor="middle" font-size="10.5" fill="#1c2333">② 请求决策</text>
+        <text x="345" y="224" text-anchor="middle" font-size="10.5" fill="#1c2333">③ permit / deny</text>
+
+        <line x1="370" y1="271" x2="430" y2="271" stroke="#5b6478" stroke-width="1.5" marker-start="url(#arrowF)" marker-end="url(#arrowF)"/>
+        <text x="400" y="263" text-anchor="middle" font-size="10" fill="#1c2333">查询/缓存属性</text>
+
+        <line x1="505" y1="292" x2="505" y2="330" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="545" y="315" text-anchor="middle" font-size="10" fill="#1c2333">读取</text>
+
+        <line x1="170" y1="271" x2="220" y2="271" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="195" y="263" text-anchor="middle" font-size="10" fill="#1c2333">下发策略</text>
+
+        <line x1="95" y1="330" x2="95" y2="292" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowF)"/>
+        <text x="135" y="315" text-anchor="middle" font-size="10" fill="#1c2333">定义/审核</text>
+      </svg>
+      <figcaption>图 8-6：XACML 参考架构——PEP 拦截请求，向 PDP 请求裁决；PDP 借助 PIP 收集属性；PAP 供管理员维护策略</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#d97706"></span>PEP 策略执行点</span>
+        <span><span class="dot" style="background:#16a34a"></span>PDP 策略决策点</span>
+        <span><span class="dot" style="background:#7c3aed"></span>PIP 策略信息点</span>
+        <span><span class="dot" style="background:#0891b2"></span>PAP 策略管理点</span>
+      </div>
+    </figure>
+
+    <h3 id="s3e">8.3.5 ABAC 最佳实践</h3>
+    <p>ABAC 的灵活性也是一把双刃剑：规则一多就很容易失控，作者提到自己经历过一次生产事故——某系统用 XPath 表达式匹配 XML 消息做鉴权，另一个团队悄悄改了消息结构，导致大量规则悄无声息地不再匹配，结果放行了不该放行的请求，好几周都没人发现，因为测试用的还是旧格式的消息。为了少踩这样的坑，书里给出几条建议：</p>
+
+    <ul>
+      <li>把 ABAC 叠加在 RBAC 这类更简单的机制之上，做纵深防御——ABAC 规则写错，也不至于门户大开。</li>
+      <li>给 API 端点建立自动化测试，策略一改就能立刻发现权限有没有被意外放宽。</li>
+      <li>策略定义要放进版本控制系统，方便回滚，并且要有正规的评审流程。</li>
+      <li>想清楚哪些策略该集中管理、哪些该留给各个 API 自己决定——过度集中会拖慢变更速度，反而可能因为"改起来太麻烦"而让过宽的策略长期留着不改，违反最小权限原则。</li>
+      <li>尽早、持续地测量 ABAC 裁决带来的性能开销。</li>
+    </ul>
+
+    <div class="callout tip">
+      <div class="title">✅ 一句话记住 ABAC</div>
+      <p>ABAC 不是用来替代 RBAC 的，而是用来补足 RBAC 表达不了的"运行时上下文"规则；默认允许、deny 优先，是把 ABAC 安全地叠加在已有权限体系之上的关键设计。</p>
+    </div>
+
+    <h2 id="s4">本章小结</h2>
+    <table>
+      <thead><tr><th>模型</th><th>核心思路</th><th>优点</th><th>局限 / 注意点</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>组 Group</td>
+          <td>把用户归类，权限（或角色）发给组而不是个人；组可嵌套组</td>
+          <td>组织用户方便，LDAP 天然支持，新人入职/离职只需改组成员</td>
+          <td>仍常常允许给个人单独发权限，颗粒度未必贴合具体 API 需求</td>
+        </tr>
+        <tr>
+          <td>角色 RBAC</td>
+          <td>在用户和权限之间加一层"角色"，权限只发给角色，用户被分配角色</td>
+          <td>权限集中管理、易审计，天然支持角色定义与角色分配的职责分离</td>
+          <td>角色通常是静态的，表达不了"结合时间/上下文"的动态规则</td>
+        </tr>
+        <tr>
+          <td>属性 ABAC</td>
+          <td>用主体/资源/操作/环境四类属性实时喂给规则引擎，多条规则合并出裁决</td>
+          <td>最灵活，能表达时间、IP、通话状态等动态上下文条件</td>
+          <td>规则一多难以审计，建议叠加在 RBAC 之上、默认允许 + deny 优先做纵深防御</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>本章从"ACL 会爆炸"这个问题出发，先讲了用<strong>组</strong>把用户分类（尤其是 LDAP 里的静态组/动态组），再讲了用<strong>角色</strong>把权限打包、和用户身份解耦，最后讲了用<strong>属性</strong>做更动态的裁决，并介绍了 Drools 这样的规则引擎和 XACML 这样的分布式策略架构。这几种模型不是互相替代的关系，实践中常常是"角色兜底、属性收紧"的组合拳。下一章会跳出"基于身份"的思路，看看不依赖用户身份、而是依赖手里凭证本身的<strong>基于能力的安全模型</strong>。</p>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch07/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 7 章：OAuth2 与 OpenID Connect</span></a>
+      <a class="next" href="../ch09/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 9 章：基于能力的安全与 Macaroon →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>

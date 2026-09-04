@@ -1,0 +1,1047 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章：基于能力的安全与 Macaroon · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html">← API 安全实战教程</a>
+    <nav>
+      <a href="#s1">9.1 什么是"基于能力"的安全</a>
+      <a href="#s2">9.2 能力 URI：把权限编码进链接</a>
+      <a href="#s3">9.2.3 HATEOAS：链接即下一步</a>
+      <a href="#s4">9.2.4 面向浏览器的能力 URI</a>
+      <a href="#s5">9.2.5/6 把能力和身份绑定</a>
+      <a href="#s6">9.3 Macaroon：能加锁的 token</a>
+      <a href="#s7">9.3.2 Macaroon Token Store</a>
+      <a href="#s8">9.3.3 第一方 caveat</a>
+      <a href="#s9">9.3.4 第三方 caveat</a>
+      <a href="#s10">本章小结</a>
+    </nav>
+  </aside>
+  <main>
+    <span class="kicker">第 9 章</span>
+    <h1>基于能力的安全与 Macaroon</h1>
+    <p class="subtitle">第 8 章教你按"这个人是谁、他在这个空间里是什么角色"来放行请求。可要是有人只想把一条消息分享给一个完全不属于这个空间的朋友呢？身份加角色表在这种场景下不够用——这一章教你换一种思路：把权限直接编码进一个"谁拿到谁能用"的链接里。</p>
+
+    <p>想象你去朋友家借一把伞。一种做法是朋友把你的名字写进一份"允许进门名单"，你到了门口，门卫翻名单确认你是谁、名单上写你能进哪几个房间——这是"身份 + 访问控制列表（ACL）"，也是第 8 章的做法。另一种做法是朋友直接把伞柜的钥匙给你，钥匙本身就只能开那一个柜子，谁拿着钥匙谁就能开，没人会先问"你是谁"。第二种就是这一章的主角：<strong>基于能力（capability）的安全</strong>。Natter 里最典型的场景是分享消息链接：如果只能靠"把对方拉进空间"才能分享一条消息，那对方就顺带拿到了这个空间里所有消息的权限，这违反了"最小权限原则（POLA，principle of least authority）"。能力 URI 能做到刚好只分享这一条消息。</p>
+
+    <h2 id="s1"><span class="num">9.1</span>什么是"基于能力"的安全</h2>
+
+    <div class="callout note">
+      <div class="title">💡 什么是能力（capability）</div>
+      <p>一个能力，就是"对某个资源的一份不可伪造的引用，外加一组访问它的权限"，两者绑在一起、缺一不可。书里举了 UNIX 的例子：<code class="inline">cp a.txt b.txt</code> 靠文件名操作，运行 <code class="inline">cp</code> 的进程必须拥有和你本人一样大的权限，才能打开任意你能打开的文件——这叫"身份/权限"模式，权限是环境赋予的（这被称为 <strong>ambient authority，环境自带的权限</strong>）。而 <code class="inline">cat &lt;a.txt &gt;b.txt</code> 靠的是两个已经打开的文件描述符（file descriptor），<code class="inline">cat</code> 本身完全不需要额外权限——文件描述符就是一种能力：它既指向具体的文件，又自带这份文件的读/写权限。</p>
+    </div>
+
+    <p>把这两种模式搬到 Web API 上来看：身份模式下，任何人都可以对一个 URL 发请求，服务器再决定"这个人有没有资格"；能力模式下，如果你手里根本没有那份能力（token），你连"尝试访问"这件事都做不成——请求要么带着有效的能力,要么就没有意义。这带来一个直接的安全好处：能力天然把权限收窄到"一个具体资源",分享一份能力,不等于分享你账号下所有资源的权限,这比"把别人拉进整个空间"或者"分享用户名密码"都更贴近最小权限。</p>
+
+    <div class="callout danger">
+      <div class="title">⚠️ 什么是 confused deputy（糊涂的代理人）攻击</div>
+      <p>当一个拥有较高权限的程序被骗去替攻击者做事，就是"confused deputy"攻击——这个程序被当成了攻击者的"代理人"却浑然不知。最早的例子是一个共享编译器：它有权限写任意文件，用户提交任务时可以指定"结果写到哪个文件"，有人把这个参数指向了计费记录文件，编译器就"尽职尽责"地把计费记录覆盖掉了。第 4 章讲的 <strong>CSRF</strong> 就是同一类问题：浏览器保存着你的 session cookie，只要你打开一个恶意页面，浏览器会在请求里自动带上这个 cookie——这个 cookie 就是一种"环境自带的权限（ambient authority）"，服务器分不清这个请求到底是你本人发起的，还是被恶意页面骗着发的。能力安全的核心目标之一，就是尽量消灭这种"环境自动附加的权限"，改成"每次请求都必须明确带上它需要的那份授权"。</p>
+    </div>
+
+    <p>当然，能力也不是没有代价：一份能力一旦分享出去，服务器很难说清楚"到底谁现在拥有对这个资源的访问权"，撤销起来也不像撤销一个用户角色那么直观（这也是这一章要用 Macaroon 解决的问题之一）。但只要设计得当——比如允许把能力再收窄后转发给别人、支持随时吊销底层 token——这些顾虑大多可以化解。</p>
+
+    <h2 id="s2"><span class="num">9.2</span>能力 URI：把权限编码进链接里</h2>
+
+    <p>REST 已经有一种天然适合表达能力的格式：URI。既然 URI 本来就是用来"指向一个资源"的，那就顺手让它也带上"允许对这个资源做什么"的信息——这样的 URI 叫<strong>能力 URI（capability URI）</strong>。你其实每天都在用这种链接：找回密码邮件里的那条链接、GitHub Gist 的分享链接、云盘"任何人持有此链接即可查看"的分享链接，本质上都是能力 URI。</p>
+
+    <p>把一个随机 token 塞进 URI，常见的有四个位置：</p>
+    <ul>
+      <li><strong>路径（path）</strong>：<code class="inline">/resource/abCd9..</code>，Dropbox 的 Chooser API 就是这么做的；</li>
+      <li><strong>查询参数（query）</strong>：<code class="inline">/resource?access_token=abCd9..</code>，RFC 6750 给这个参数定了标准名字 <code class="inline">access_token</code>；</li>
+      <li><strong>片段（fragment）</strong>：<code class="inline">/resource#tok=abCd9..</code>，<code class="inline">#</code> 后面的内容浏览器默认不会发给服务器；</li>
+      <li><strong>userinfo 部分</strong>：<code class="inline">https://abCd9..@api.example.com/resource</code>，这是当年 HTTP Basic 认证挪用的位置。</li>
+    </ul>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 路径和查询参数有泄漏风险</div>
+      <p>把 token 放进路径或查询参数，最容易实现，但也最容易被服务器/代理的访问日志记录下来；如果这条链接被网页直接渲染出来给用户点，还可能通过 <code class="inline">Referer</code> 头或 <code class="inline">window.referrer</code> 泄漏给第三方站点，或者留在浏览器历史记录里。这也是当年 <code class="inline">http://alice:secret@example.com/</code> 这种"用户名密码写进 URL"的写法被浏览器厂商联手封杀的原因之一——攻击者甚至能拿它伪造出 <code class="inline">http://www.google.com:80@evil.example.com/</code> 这样看起来像 google.com 的钓鱼链接。</p>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ 但对 REST API 来说风险小得多</div>
+      <p>上面这些坑主要发生在"用户直接在浏览器地址栏里导航"的场景。API 返回的是 JSON，不会被浏览器当页面渲染，也就不会触发 <code class="inline">Referer</code> 泄漏或写入浏览器历史。所以本章后面统一采用最简单的方式——把 token 放进查询参数 <code class="inline">access_token</code>，再靠"短生命周期 + 和用户身份绑定"来兜底剩余的风险（见 9.2.5/9.2.6 节）。</p>
+    </div>
+
+    <h3>在 Natter API 里生成和校验能力 URI</h3>
+    <p>要生成一个能力 URI，本质上还是复用第 5、6 章已经写好的 <code class="inline">SecureTokenStore</code>：创建一条 token，把"这份能力对应哪个资源路径（<code class="inline">path</code>）""允许做什么（<code class="inline">perms</code>，读/写/删的组合）"存进 token 的属性里，再把生成的 token id 拼进 URL 的查询参数。和普通认证 token 不同的是：能力 token 不需要绑定一个具体用户（<code class="inline">username</code> 字段可以留空），因为它本来就不代表"你是谁"，只代表"这张票能干什么"。校验的时候，反过来：先按 <code class="inline">access_token</code> 查出 token，再核对 token 里记的路径是不是正好等于当前请求的路径——如果对得上，就把 token 里的 <code class="inline">perms</code> 写进 <code class="inline">request</code> 的属性里，交给后面和第 8 章一样的权限检查逻辑去用。下面这段 <code class="inline">CapabilityController</code> 的代码已经是本章末尾"和身份绑定"之后的最终版本（多了一行校验 <code class="inline">username</code>），后面 9.2.5 节会专门解释这一行的作用。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/controller/CapabilityController.java（节选）</div>
+        <pre><code>public URI createUri(Request request, String path, String perms,
+                     Duration expiryDuration) {
+    var subject = (String) request.attribute("subject");
+    var token = new Token(now().plus(expiryDuration), subject);
+    token.attributes.put("path", path);
+    token.attributes.put("perms", perms);
+
+    var tokenId = tokenStore.create(request, token);
+
+    var uri = URI.create(request.uri());
+    return uri.resolve(path + "?access_token=" + tokenId);
+}
+
+public void lookupPermissions(Request request, Response response) {
+    var tokenId = request.queryParams("access_token");
+    if (tokenId == null) { return; }
+
+    tokenStore.read(request, tokenId).ifPresent(token -&gt; {
+        // 拿到 token 的人还必须是当初签发时认证过的那个用户，
+        // 否则一律不给权限——这是 9.2.6 节"加固能力 URI"之后的效果。
+        if (!Objects.equals(token.username, request.attribute("subject"))) {
+            return;
+        }
+        var tokenPath = token.attributes.get("path");
+        if (Objects.equals(tokenPath, request.pathInfo())) {
+            request.attribute("perms", token.attributes.get("perms"));
+        }
+    });
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">capabilities/tokens.py + capabilities/middleware.py（教学示例）</div>
+        <pre><code># capabilities/tokens.py
+from django.utils.crypto import get_random_string
+from django.utils import timezone
+
+def create_capability_uri(request, path, perms, ttl):
+    token_id = get_random_string(30)
+    CapabilityToken.objects.create(
+        token_id=token_id,
+        # 和 Java 版一样：把当前登录用户写进去，
+        # 做"能力 + 身份"双重校验，而不是让任何人都能用这张 token。
+        user=request.user if request.user.is_authenticated else None,
+        path=path,
+        perms=perms,
+        expiry=timezone.now() + ttl,
+    )
+    return request.build_absolute_uri(path) + f"?access_token={token_id}"
+
+
+# capabilities/middleware.py
+class CapabilityMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        token_id = request.GET.get("access_token")
+        if token_id:
+            token = CapabilityToken.objects.filter(
+                token_id=token_id, expiry__gt=timezone.now(),
+            ).first()
+            if token and token.user_id in (None, getattr(request.user, "id", None)):
+                if token.path == request.path:
+                    request.perms = token.perms
+        return self.get_response(request)</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/capabilities.ts + src/middleware/capability.ts（教学示例）</div>
+        <pre><code>// src/routes/capabilities.ts
+// toBase64Url 是几行的小工具函数，把字节数组编码成 URL-safe base64，这里从略
+function createCapabilityUri(c: Context, path: string, perms: string, ttlMs: number) {
+  const tokenId = toBase64Url(crypto.getRandomValues(new Uint8Array(20)))
+  db.insert(capabilityTokens).values({
+    tokenId,
+    userId: c.get('subject') ?? null,
+    path,
+    perms,
+    expiry: new Date(Date.now() + ttlMs),
+  }).run()
+
+  const url = new URL(c.req.url)
+  url.pathname = path
+  url.search = `?access_token=${tokenId}`
+  return url.toString()
+}
+
+// src/middleware/capability.ts
+export async function lookupPermissions(c: Context, next: Next) {
+  const tokenId = c.req.query('access_token')
+  if (tokenId) {
+    const token = db.select().from(capabilityTokens)
+      .where(eq(capabilityTokens.tokenId, tokenId)).get()
+
+    // token.userId 必须和当前登录用户一致，逻辑与 Java 版完全对应
+    if (token && token.expiry > new Date() &&
+        (token.userId === null || token.userId === c.get('subject'))) {
+      if (token.path === new URL(c.req.url).pathname) {
+        c.set('perms', token.perms)
+      }
+    }
+  }
+  await next()
+}</code></pre>
+      </div>
+    </div>
+
+    <p>创建一个空间之后，返回的响应会长这样——注意 <code class="inline">uri</code> 字段已经不是简单的 <code class="inline">/spaces/1</code>，而是带着 <code class="inline">access_token</code> 的完整能力 URI：</p>
+    <pre class="plain"><code>$ curl -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"test","owner":"demo"}' \
+    -u demo:password https://localhost:4567/spaces
+
+{"name":"test",
+ "uri":"https://localhost:4567/spaces/1?access_token=jKbRWGFDuaY5yKFyiiF3Lhfbz-U"}</code></pre>
+
+    <div class="callout note">
+      <div class="title">💡 为什么创建空间还要先登录？</div>
+      <p>这一步没有用身份去判断"你有没有权限创建空间"（创建空间本来就不需要权限），登录纯粹是为了在审计日志里留一条"这是谁创建的"的记录，属于可问责性（accountability），跟授权是两码事。</p>
+    </div>
+
+    <h2 id="s3"><span class="num">9.2.3</span>HATEOAS：响应体自己告诉你下一步能做什么</h2>
+
+    <p>拿到 <code class="inline">/spaces/1</code> 的能力 URI 后，你会发现它其实用处有限：真正要读/发消息，得访问的是子资源 <code class="inline">/spaces/1/messages</code>，而能力 URI 天生"专款专用"——一份能力只认它对应的那一个资源，不能像身份模式下那样"反正是同一个 token，我自己在后面拼个 <code class="inline">/messages</code> 就行"。可能力又是不可伪造的，客户端没法凭空"造"出一个新的能力。</p>
+
+    <div class="callout note">
+      <div class="title">💡 什么是 HATEOAS</div>
+      <p>HATEOAS（Hypertext As The Engine Of Application State）是 REST 提出者 Roy Fielding 强调的核心原则：客户端不应该自己知道"怎么拼出下一个 URL"，而应该由服务器在响应里直接把链接给你，你只管点着走。这个原则和能力 URI 是绝配——服务器可以在一次响应里返回好几个指向不同子资源、带着不同权限的能力链接，客户端全程不用自己"猜"或"拼"URL，从一个能力"顺藤摸瓜"导航到下一个能力。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 300" role="img" aria-label="HATEOAS 时序图：创建空间后响应体自带多条能力链接，客户端跟着链接继续访问">
+        <defs>
+          <marker id="arrowD3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="40" y="10" width="160" height="36" rx="8" fill="#2563eb"/>
+        <text x="120" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+        <rect x="440" y="10" width="160" height="36" rx="8" fill="#16a34a"/>
+        <text x="520" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+        <line x1="120" y1="46" x2="120" y2="270" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="520" y1="46" x2="520" y2="270" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="130" y1="90" x2="510" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD3)"/>
+        <text x="320" y="80" text-anchor="middle" font-size="12" fill="#1c2333">① POST /spaces { name:'test', owner:'demo' }（已认证）</text>
+
+        <line x1="510" y1="140" x2="130" y2="140" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD3)"/>
+        <text x="320" y="126" text-anchor="middle" font-size="12" fill="#1c2333">② 201 Created { uri, messages-rwd, messages-rw, messages-r }</text>
+        <text x="320" y="155" text-anchor="middle" font-size="11" fill="#5b6478">客户端不用自己拼 URL，直接读 messages-rw 字段</text>
+
+        <line x1="130" y1="195" x2="510" y2="195" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD3)"/>
+        <text x="320" y="185" text-anchor="middle" font-size="12" fill="#1c2333">③ GET /spaces/1/messages?access_token=…（跟着 messages-rw 链接走）</text>
+
+        <line x1="510" y1="245" x2="130" y2="245" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD3)"/>
+        <text x="320" y="233" text-anchor="middle" font-size="12" fill="#1c2333">④ 200 OK [ 每条消息又各自带着自己的能力 URI ]</text>
+        <text x="320" y="258" text-anchor="middle" font-size="11" fill="#5b6478">继续沿着链接导航，客户端不需要自己猜路径</text>
+      </svg>
+      <figcaption>图 9-1：HATEOAS 时序图——响应体里直接给出下一步能用的能力链接</figcaption>
+    </figure>
+
+    <p>具体实现上，<code class="inline">createSpace</code> 一口气生成四份权限不同的能力 URI：一份对空间本身的完全权限，以及对 <code class="inline">/messages</code> 子资源的"读写删（rwd）""读写（rw）""只读（r）"三种权限，全部作为普通字段塞进响应 JSON。这样空间主人可以把权限最大的链接留给自己和管理员，把只读链接分享给外人。<code class="inline">findMessages</code> 里还有一个容易漏掉的细节：返回每条消息的链接时，权限不能超过<strong>当前这次请求用的那份能力</strong>——如果访问者手里拿的本来就是只读链接，那它看到的消息链接也必须是只读的，不能凭空"升级"。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/controller/SpaceController.java（节选：createSpace）</div>
+        <pre><code>var expiry = Duration.ofDays(100000);
+var uri = capabilityController.createUri(request,
+        "/spaces/" + spaceId, "rwd", expiry);
+var messagesUri = capabilityController.createUri(request,
+        "/spaces/" + spaceId + "/messages", "rwd", expiry);
+var messagesReadWriteUri = capabilityController.createUri(
+        request, "/spaces/" + spaceId + "/messages", "rw", expiry);
+var messagesReadOnlyUri = capabilityController.createUri(
+        request, "/spaces/" + spaceId + "/messages", "r", expiry);
+
+response.status(201);
+response.header("Location", uri.toASCIIString());
+
+return new JSONObject()
+        .put("name", spaceName)
+        .put("uri", uri)
+        .put("messages-rwd", messagesUri)
+        .put("messages-rw", messagesReadWriteUri)
+        .put("messages-r", messagesReadOnlyUri);</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">spaces/serializers.py（教学示例）</div>
+        <pre><code># DRF 默认的 HyperlinkedModelSerializer 生成的链接基于资源主键
+# （本质还是"身份 + ACL"思路）。要把权限编码进链接本身，
+# 需要自己写 SerializerMethodField，逻辑对应 Java 的 createUri。
+from datetime import timedelta
+from rest_framework import serializers
+from capabilities.tokens import create_capability_uri
+
+class SpaceSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    uri = serializers.SerializerMethodField()
+    messages_rwd = serializers.SerializerMethodField()
+    messages_rw = serializers.SerializerMethodField()
+    messages_r = serializers.SerializerMethodField()
+
+    def _messages_link(self, space, perms):
+        request = self.context["request"]
+        return create_capability_uri(
+            request, f"/spaces/{space.id}/messages", perms,
+            timedelta(days=100000))
+
+    def get_uri(self, space):
+        request = self.context["request"]
+        return create_capability_uri(
+            request, f"/spaces/{space.id}", "rwd", timedelta(days=100000))
+
+    def get_messages_rwd(self, space):
+        return self._messages_link(space, "rwd")
+
+    def get_messages_rw(self, space):
+        return self._messages_link(space, "rw")
+
+    def get_messages_r(self, space):
+        return self._messages_link(space, "r")</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/spaces.ts（教学示例）</div>
+        <pre><code>app.post('/spaces', requireAuth, async (c) => {
+  const { name, owner } = await c.req.json()
+  const spaceId = await insertSpace(name, owner)
+
+  const expiryMs = 100000 * 24 * 60 * 60 * 1000
+  const uri = createCapabilityUri(c, `/spaces/${spaceId}`, 'rwd', expiryMs)
+  const messagesUri = createCapabilityUri(c, `/spaces/${spaceId}/messages`, 'rwd', expiryMs)
+  const messagesRW = createCapabilityUri(c, `/spaces/${spaceId}/messages`, 'rw', expiryMs)
+  const messagesR = createCapabilityUri(c, `/spaces/${spaceId}/messages`, 'r', expiryMs)
+
+  c.header('Location', uri)
+  // HATEOAS：把"下一步能做什么"直接写进响应体，客户端不用自己拼 URL
+  return c.json({
+    name,
+    uri,
+    'messages-rwd': messagesUri,
+    'messages-rw': messagesRW,
+    'messages-r': messagesR,
+  }, 201)
+})</code></pre>
+      </div>
+    </div>
+
+    <h2 id="s4"><span class="num">9.2.4</span>面向浏览器的能力 URI</h2>
+
+    <p>9.2 节一开始提到，查询参数里的 token 有被日志/<code class="inline">Referer</code>/浏览器历史泄漏的风险，这个风险对纯后端调用的 API 影响不大，但如果能力 URI 是要直接被浏览器打开、渲染成页面的（比如 Natter 的消息浏览页面），风险就实打实存在了。Waterken 服务器发明的 <strong>web-key</strong> 方案给出了解法：把 token 放进 URL 的 <code class="inline">#</code> 片段（fragment）里。片段有个特殊性质——浏览器默认不会把它发给服务器，也不会出现在 <code class="inline">Referer</code> 头或 <code class="inline">window.referrer</code> 里。代价是服务器看不到这个 token 了，只能靠前端 JS 自己去读、再想办法送到 API。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 680 280" role="img" aria-label="web-key 方案：浏览器打开带 fragment 的能力 URI，前端 JS 取出 token 再发第二次请求">
+        <defs>
+          <marker id="arrowD4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="40" y="10" width="180" height="36" rx="8" fill="#2563eb"/>
+        <text x="130" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">浏览器</text>
+        <rect x="460" y="10" width="180" height="36" rx="8" fill="#16a34a"/>
+        <text x="550" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter 服务器</text>
+        <line x1="130" y1="46" x2="130" y2="245" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="550" y1="46" x2="550" y2="245" stroke="#e2e5ee" stroke-width="2"/>
+
+        <text x="130" y="64" text-anchor="middle" font-size="11.5" fill="#5b6478">浏览器打开一条 web-key 链接：</text>
+        <text x="130" y="80" text-anchor="middle" font-size="11.5" fill="#5b6478">https://…/spaces/1#access_token=jKbR…（# 后面不会发给服务器）</text>
+
+        <line x1="140" y1="110" x2="540" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD4)"/>
+        <text x="335" y="100" text-anchor="middle" font-size="12" fill="#1c2333">① GET /spaces/1（浏览器自动丢弃 # 后面的部分）</text>
+
+        <line x1="540" y1="160" x2="140" y2="160" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD4)"/>
+        <text x="335" y="150" text-anchor="middle" font-size="12" fill="#1c2333">② 返回同一份 capability.js 模板（可以被长期缓存）</text>
+
+        <text x="130" y="185" text-anchor="middle" font-size="11.5" fill="#5b6478">③ capability.js 读取 location.hash，</text>
+        <text x="130" y="201" text-anchor="middle" font-size="11.5" fill="#5b6478">拼成 ?access_token=… 的普通 URL</text>
+
+        <line x1="140" y1="230" x2="540" y2="230" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD4)"/>
+        <text x="335" y="220" text-anchor="middle" font-size="12" fill="#1c2333">④ GET /spaces/1?access_token=jKbR…（服务器第一次真正看到 token）</text>
+      </svg>
+      <figcaption>图 9-2：web-key 方案——token 放在 fragment 里，前端 JS 负责挪到查询参数再发请求</figcaption>
+    </figure>
+
+    <p>因为这份模板脚本本身不含任何敏感信息，且对所有能力 URI 都通用，浏览器可以把它长期缓存下来，之后打开新的能力链接就不用再多走一次"先拿模板"的请求了。项目里实际的 <code class="inline">capability.js</code> 就是这么写的：</p>
+    <pre class="plain"><code>function getCap(url, callback) {
+    let capUrl = new URL(url);
+    let token = capUrl.hash.substring(1);
+    capUrl.hash = '';
+    capUrl.search = '?access_token=' + token;
+
+    return fetch(capUrl.href)
+    .then(response => response.json())
+    .then(callback)
+    .catch(err => console.error('Error: ', err));
+}</code></pre>
+    <p class="file-path" style="margin:-8px 0 18px;color:var(--text-dim);font-family:var(--font-mono);font-size:11.5px;">ch09/src/main/resources/public/capability.js（原书代码，逐字节保留）</p>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 这段 JS 和用什么后端框架无关</div>
+      <p>它纯粹跑在浏览器里，Django 或 Hono 项目要做同样的事，前端塞的还是这同一段脚本（顶多换成 TypeScript 写法），后端只需要老老实实提供静态文件托管。真正需要框架特定代码的，是它请求的那个 <code class="inline">?access_token=…</code> 接口——也就是上一节已经对比过的 <code class="inline">lookupPermissions</code>/<code class="inline">CapabilityMiddleware</code>/<code class="inline">lookupPermissions</code> 中间件。如果你的前端是 SPA（单页应用），要格外小心：Vue/React 这类框架用 HTML5 history API 让路由"看起来"没有 <code class="inline">#</code>，但如果 token 真的不在 fragment 里，这里说的安全好处就全部作废了。</p>
+    </div>
+
+    <h2 id="s5"><span class="num">9.2.5 / 9.2.6</span>把能力和身份结合、加固能力 URI</h2>
+
+    <p>目前为止，所有授权都只看能力 token，不看你是谁。这带来一个新问题：Natter 有些操作（比如发消息）本身就带着"我是谁"的宣称——消息的作者字段。如果任何拿到发消息能力 URI 的人都能冒充别人发消息，审计日志就完全不可信了。另外，一份能力 URI 一旦泄漏（比如被记进了某个日志文件），任何拿到它的人都能直接用——这跟身份 token 被偷的风险是一样的。</p>
+
+    <p>书里给了两种把身份"接"回来的思路：一种是直接把用户名塞进能力 token 本身，问题是这样一来"分享这份能力"就等于"允许对方冒充你"；另一种更常见——保留一个传统的登录态（比如长效的登录 cookie），只用它来做身份问题的问责，不用来做授权判断。授权仍然完全靠能力 token，cookie 只负责回答"这次操作到底是谁做的"。</p>
+
+    <div class="callout danger">
+      <div class="title">⚠️ 能力也挡不住 CSRF——除非把它和身份绑在一起</div>
+      <p>你可能会想："都用能力做授权了，还需要防 CSRF 吗？"答案是仍然需要。CSRF 攻击者手里如果本来就有一份合法的能力 URI（比如他自己账号下的），他完全可以诱导受害者的浏览器带着受害者的登录 cookie 去访问这个能力 URI——这时候"权限"来自攻击者的能力 token，但"身份"却被张冠李戴成了受害者，同样是一次confused deputy。</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 700 320" role="img" aria-label="confused deputy 攻击流程：攻击者的网页诱导受害者浏览器自动带着 Cookie 发起请求">
+        <defs>
+          <marker id="arrowD2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="140" height="36" rx="8" fill="#dc2626"/>
+        <text x="90" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">攻击者的网页</text>
+        <rect x="280" y="10" width="140" height="36" rx="8" fill="#2563eb"/>
+        <text x="350" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">受害者的浏览器</text>
+        <rect x="540" y="10" width="140" height="36" rx="8" fill="#16a34a"/>
+        <text x="610" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+        <line x1="90" y1="46" x2="90" y2="260" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="350" y1="46" x2="350" y2="260" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="610" y1="46" x2="610" y2="260" stroke="#e2e5ee" stroke-width="2"/>
+
+        <text x="350" y="64" text-anchor="middle" font-size="11" fill="#5b6478">此前：用户已登录 Natter，</text>
+        <text x="350" y="79" text-anchor="middle" font-size="11" fill="#5b6478">浏览器持有 Cookie: session=alice</text>
+
+        <line x1="350" y1="110" x2="90" y2="110" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD2)"/>
+        <text x="220" y="100" text-anchor="middle" font-size="11.5" fill="#1c2333">① 用户点开钓鱼链接，浏览器加载 evil.example.com</text>
+
+        <line x1="350" y1="170" x2="610" y2="170" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD2)"/>
+        <text x="480" y="158" text-anchor="middle" font-size="11.5" fill="#1c2333">② 页面里的表单自动提交 POST /spaces/1/messages</text>
+        <text x="480" y="186" text-anchor="middle" font-size="11" fill="#5b6478">浏览器自动带上 Cookie: session=alice（ambient authority）</text>
+
+        <rect x="480" y="200" width="200" height="44" rx="8" fill="#d97706"/>
+        <text x="580" y="218" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">③ API 只看到"合法 Cookie"</text>
+        <text x="580" y="234" text-anchor="middle" fill="#fff" font-size="11">→ 以为是 alice 本人操作，放行</text>
+
+        <rect x="40" y="264" width="620" height="40" rx="8" fill="none" stroke="#dc2626" stroke-width="1.5"/>
+        <text x="350" y="281" text-anchor="middle" font-size="11.5" fill="#dc2626" font-weight="600">结果：浏览器在不知情下成了攻击者的"代理人"（confused deputy）</text>
+        <text x="350" y="297" text-anchor="middle" font-size="11" fill="#5b6478">CSRF 正是这种攻击在 Web 场景下的典型表现</text>
+      </svg>
+      <figcaption>图 9-3：confused deputy 攻击——浏览器被诱导用受害者的身份替攻击者办事</figcaption>
+    </figure>
+
+    <p>解法是把能力 token 和登录用户绑定：签发能力 URI 时，把当前认证用户写进 token 的 <code class="inline">username</code> 字段；校验时，除了检查路径是否匹配，还要求 token 的 <code class="inline">username</code> 必须等于当前请求携带 cookie 所认证出的用户。这正是本章开头那段 <code class="inline">CapabilityController</code> 代码里已经包含的逻辑——项目里的最终版本从一开始就带着这行校验。绑定之后，好处是双重的：</p>
+    <ul>
+      <li>能力 token 被偷，攻击者没有对应的登录 cookie 照样用不了；</li>
+      <li>登录 cookie 被偷，攻击者没有对应的能力 token 也办不成事——cookie 和能力互为对方的"第二把锁"，这天然就是一种 CSRF 防护，原来第 4 章专门加的反 CSRF token 反而可以拿掉了。</li>
+    </ul>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 绑定之后，分享能力就没那么"随手"了</div>
+      <p>能力和身份绑死之后，原来"直接把链接发给朋友"的分享方式就失效了——那条链接对朋友的浏览器来说没有匹配的 cookie。Natter 为此专门加了一个 <code class="inline">/capabilities</code> 端点，让持有一份能力的人可以主动把它"兑换"成另一个用户名下的新能力（还能顺便收窄权限），这就是下面这个 <code class="inline">share</code> 方法要做的事。</p>
+    </div>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/controller/CapabilityController.java（节选：share）</div>
+        <pre><code>public JSONObject share(Request request, Response response) {
+    var json = new JSONObject(request.body());
+
+    var capUri = URI.create(json.getString("uri"));
+    var path = capUri.getPath();
+    var query = capUri.getQuery();
+    var tokenId = query.substring(query.indexOf('=') + 1);
+
+    var token = tokenStore.read(request, tokenId).orElseThrow();
+    if (!Objects.equals(token.attributes.get("path"), path)) {
+        throw new IllegalArgumentException("incorrect path");
+    }
+
+    var tokenPerms = token.attributes.get("perms");
+    var perms = json.optString("perms", tokenPerms);
+    if (!tokenPerms.contains(perms)) {
+        Spark.halt(403);   // 只能收窄权限，不能凭空升级
+    }
+
+    var user = json.getString("user");
+    var newToken = new Token(token.expiry, user);
+    newToken.attributes.put("path", path);
+    newToken.attributes.put("perms", perms);
+
+    var newTokenId = tokenStore.create(request, newToken);
+    var uri = URI.create(request.uri());
+    var newCapUri = uri.resolve(path + "?access_token=" + newTokenId);
+    return new JSONObject().put("uri", newCapUri);
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">spaces/views.py（教学示例）</div>
+        <pre><code>from urllib.parse import urlparse, parse_qs
+from django.http import JsonResponse
+from django.contrib.auth.decorators import login_required
+from django.views.decorators.http import require_POST
+
+@require_POST
+@login_required
+def share_capability(request):
+    body = json.loads(request.body)
+    parsed = urlparse(body["uri"])
+    path = parsed.path
+    token_id = parse_qs(parsed.query)["access_token"][0]
+
+    token = get_object_or_404(CapabilityToken, token_id=token_id)
+    if token.path != path:
+        return JsonResponse({"error": "incorrect path"}, status=400)
+
+    perms = body.get("perms", token.perms)
+    if perms not in token.perms:            # 只能是原权限的子集
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    new_token = CapabilityToken.objects.create(
+        token_id=get_random_string(30),
+        user_id=body["user"],
+        path=path,
+        perms=perms,
+        expiry=token.expiry,
+    )
+    new_uri = (request.build_absolute_uri(path) +
+               f"?access_token={new_token.token_id}")
+    return JsonResponse({"uri": new_uri})</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/routes/capabilities.ts（教学示例）</div>
+        <pre><code>app.post('/capabilities', requireAuth, async (c) => {
+  const body = await c.req.json() as { uri: string; user: string; perms?: string }
+  const parsed = new URL(body.uri)
+  const path = parsed.pathname
+  const tokenId = parsed.searchParams.get('access_token')!
+
+  const token = db.select().from(capabilityTokens)
+    .where(eq(capabilityTokens.tokenId, tokenId)).get()
+  if (!token || token.path !== path) {
+    return c.json({ error: 'incorrect path' }, 400)
+  }
+
+  const perms = body.perms ?? token.perms
+  if (!token.perms.includes(perms)) {        // 同样只能收窄权限
+    return c.json({ error: 'forbidden' }, 403)
+  }
+
+  const newTokenId = toBase64Url(crypto.getRandomValues(new Uint8Array(20)))
+  db.insert(capabilityTokens).values({
+    tokenId: newTokenId, userId: body.user, path, perms, expiry: token.expiry,
+  }).run()
+
+  const newUri = new URL(c.req.url)
+  newUri.pathname = path
+  newUri.search = `?access_token=${newTokenId}`
+  return c.json({ uri: newUri.toString() })
+})</code></pre>
+      </div>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 720 400" role="img" aria-label="能力 URI 模式和身份加 ACL 模式的对比">
+        <defs>
+          <marker id="arrowD1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <text x="180" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#1c2333">身份 + ACL 模式</text>
+        <text x="540" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#1c2333">能力 URI 模式</text>
+        <line x1="360" y1="10" x2="360" y2="372" stroke="#e2e5ee" stroke-width="1.5" stroke-dasharray="4,4"/>
+
+        <rect x="50" y="34" width="260" height="44" rx="8" fill="#2563eb"/>
+        <text x="180" y="53" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">浏览器</text>
+        <text x="180" y="69" text-anchor="middle" fill="#e6edff" font-size="10.5">Cookie: session=alice</text>
+        <rect x="410" y="34" width="260" height="44" rx="8" fill="#2563eb"/>
+        <text x="540" y="53" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">浏览器</text>
+        <text x="540" y="69" text-anchor="middle" fill="#e6edff" font-size="10.5">持有一条能力 URI</text>
+
+        <line x1="180" y1="78" x2="180" y2="106" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1)"/>
+        <line x1="540" y1="78" x2="540" y2="106" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1)"/>
+        <text x="180" y="97" text-anchor="middle" font-size="10.5" fill="#1c2333">① GET /spaces/1/messages</text>
+        <text x="540" y="97" text-anchor="middle" font-size="10.5" fill="#1c2333">① GET …/messages?access_token=…</text>
+
+        <rect x="50" y="106" width="260" height="44" rx="8" fill="#16a34a"/>
+        <text x="180" y="132" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">Natter API 服务器</text>
+        <rect x="410" y="106" width="260" height="44" rx="8" fill="#16a34a"/>
+        <text x="540" y="132" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">Natter API 服务器</text>
+
+        <line x1="180" y1="150" x2="180" y2="182" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1)"/>
+        <line x1="540" y1="150" x2="540" y2="182" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1)"/>
+        <text x="180" y="171" text-anchor="middle" font-size="10.5" fill="#1c2333">② 这是谁？有权限吗？</text>
+        <text x="540" y="171" text-anchor="middle" font-size="10.5" fill="#1c2333">② token 签名对不对？路径对不对？</text>
+
+        <rect x="50" y="182" width="260" height="48" rx="8" fill="#7c3aed"/>
+        <text x="180" y="201" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">user_roles 表（ACL）</text>
+        <text x="180" y="217" text-anchor="middle" fill="#ece5ff" font-size="10.5">查 alice 在 space 1 的角色</text>
+        <rect x="410" y="182" width="260" height="48" rx="8" fill="#7c3aed"/>
+        <text x="540" y="201" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">Token Store</text>
+        <text x="540" y="217" text-anchor="middle" fill="#ece5ff" font-size="10.5">perms 字段已经写在 token 里</text>
+
+        <line x1="180" y1="230" x2="180" y2="262" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1)"/>
+        <line x1="540" y1="230" x2="540" y2="262" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1)"/>
+        <text x="180" y="251" text-anchor="middle" font-size="10.5" fill="#1c2333">③ 角色=owner → 允许</text>
+        <text x="540" y="251" text-anchor="middle" font-size="10.5" fill="#1c2333">③ 权限已知 → 直接放行</text>
+
+        <rect x="50" y="262" width="260" height="40" rx="8" fill="#16a34a"/>
+        <text x="180" y="286" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">✓ 返回消息列表</text>
+        <rect x="410" y="262" width="260" height="40" rx="8" fill="#16a34a"/>
+        <text x="540" y="286" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">✓ 返回消息列表</text>
+
+        <text x="360" y="336" text-anchor="middle" font-size="12" fill="#5b6478">身份模式：每次请求都要反查"这是谁、他被允许做什么"。</text>
+        <text x="360" y="354" text-anchor="middle" font-size="12" fill="#5b6478">能力模式：权限已经编码进 token 本身，服务器只需要验证 token 有效即可放行。</text>
+      </svg>
+      <figcaption>图 9-4：能力 URI 模式 vs 身份 + ACL 模式——权限来自哪里，决定了服务器要不要"多问一句"</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>客户端 / 浏览器</span>
+        <span><span class="dot" style="background:#16a34a"></span>API 服务器</span>
+        <span><span class="dot" style="background:#7c3aed"></span>权限判定来源（ACL 表 / Token Store）</span>
+      </div>
+    </figure>
+
+    <h2 id="s6"><span class="num">9.3</span>Macaroon：可以不断"加锁"的 token</h2>
+
+    <p>能力 URI 解决了"分享单个资源"的问题，但粒度还是服务器说了算——<code class="inline">createSpace</code> 只准备了 <code class="inline">rwd</code>/<code class="inline">rw</code>/<code class="inline">r</code> 三档权限，如果用户想分享"只能看今天中午之后的消息"这种更细的条件，服务器不可能提前把所有排列组合都准备出能力 URI。<strong>Macaroon</strong>（由 Google 一组研究者在 2014 年提出）解决的正是这个问题：它允许<strong>任何人</strong>在一份 token 后面追加"caveat"（限制条件），caveat 只能让权限变得更窄，谁都没法把已经加上的限制去掉。</p>
+
+    <div class="callout note">
+      <div class="title">💡 一个更好理解的类比：购物小票背面盖章</div>
+      <p>把 macaroon 想象成一张购物小票。小票背面已经盖好了一个"官方钢印"（初始的 HMAC 签名）。任何人都可以在钢印旁边再写一条新的限制，比如"仅限今天有效"，然后用<strong>上一个钢印的花纹当模具</strong>盖一个新章——因为没有原始钢印模具（也就是服务器手里的密钥），谁都没法逆向算出上一个钢印长什么样，所以也没法把中间某条限制擦掉或者伪造一条新的。谁都能"往后加限制"，谁都不能"往前减限制"。</p>
+    </div>
+
+    <p>这背后利用的是 HMAC 的一个有趣性质：HMAC 算出来的认证标签（tag），本身又可以当作密钥去对下一段消息做 HMAC。追加一个 caveat 时，就是拿"上一个 tag"当 key，对新 caveat 的文本再做一次 HMAC-SHA256，算出新 tag，然后把旧 tag 丢掉，只把 caveat 文本和新 tag 追加到 macaroon 末尾。反复这样做，就形成一条"链"：</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 500" role="img" aria-label="Macaroon 的 HMAC caveat 链：每一步都用上一个 tag 当密钥追加新的限制条件">
+        <rect x="160" y="40" width="320" height="44" rx="8" fill="#2563eb"/>
+        <text x="320" y="67" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Token Identifier（如 jKbRWG…）</text>
+
+        <line x1="320" y1="84" x2="320" y2="128" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1b)"/>
+        <text x="320" y="110" text-anchor="middle" font-size="11.5" fill="#1c2333">HMAC-SHA256(密钥 K, identifier)</text>
+
+        <rect x="160" y="128" width="320" height="44" rx="8" fill="#7c3aed"/>
+        <text x="320" y="155" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Tag₀ —— 初始签名</text>
+
+        <line x1="320" y1="172" x2="320" y2="216" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1b)"/>
+        <text x="320" y="198" text-anchor="middle" font-size="11.5" fill="#1c2333">喂入 caveat「method = GET」→ 新 Tag</text>
+
+        <rect x="160" y="216" width="320" height="44" rx="8" fill="#7c3aed"/>
+        <text x="320" y="243" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Tag₁（含 caveat：method=GET）</text>
+
+        <line x1="320" y1="260" x2="320" y2="304" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1b)"/>
+        <text x="320" y="286" text-anchor="middle" font-size="11.5" fill="#1c2333">喂入 caveat「time &lt; …12:05Z」→ 新 Tag</text>
+
+        <rect x="160" y="304" width="320" height="44" rx="8" fill="#7c3aed"/>
+        <text x="320" y="331" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Tag₂（含 method=GET, time&lt;…）</text>
+
+        <line x1="320" y1="348" x2="320" y2="392" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD1b)"/>
+        <text x="320" y="374" text-anchor="middle" font-size="11.5" fill="#1c2333">喂入 caveat「since &gt; 昨天」→ 最终 Tag</text>
+
+        <rect x="160" y="392" width="320" height="44" rx="8" fill="#16a34a" stroke="#0f5c26" stroke-width="1.5"/>
+        <text x="320" y="419" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">Tag₃ = 最终签名（写在 macaroon 末尾）</text>
+
+        <text x="320" y="454" text-anchor="middle" font-size="12" fill="#1c2333">Tag₃ = HMAC( HMAC( HMAC( HMAC(K, id), c₁ ), c₂ ), c₃ )</text>
+        <text x="320" y="474" text-anchor="middle" font-size="11.5" fill="#5b6478">拿不到 K 就没法从 Tag₃ 反推任何一步——所以谁都能"加"caveat，没人能"删"caveat</text>
+        <defs>
+          <marker id="arrowD1b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+      </svg>
+      <figcaption>图 9-5：Macaroon 的 HMAC caveat 链——新 caveat 追加时，用上一个 tag 当 HMAC 密钥</figcaption>
+      <div class="legend">
+        <span><span class="dot" style="background:#2563eb"></span>原始数据（token identifier）</span>
+        <span><span class="dot" style="background:#7c3aed"></span>中间签名（加了部分 caveat）</span>
+        <span><span class="dot" style="background:#16a34a"></span>最终签名（校验时要复现出的目标值）</span>
+      </div>
+    </figure>
+
+    <p>校验时反过来做：服务器手里有原始密钥 <code class="inline">K</code>，从 identifier 开始重新算一遍这条链——每遇到一个 caveat，就用刚算出来的 tag 当 key 继续往下算，最后比较算出来的 tag 和 macaroon 自带的 tag 是否一致。书里给出了这段校验逻辑的最小实现（<code class="inline">jmacaroons</code> 库内部做的就是同一件事，你不需要自己写这段代码，这里贴出来只是为了让你看懂它到底在干什么）：</p>
+    <pre class="plain"><code>private boolean verify(String id, List&lt;String&gt; caveats, byte[] tag) throws Exception {
+    var hmac = Mac.getInstance("HmacSHA256");
+    hmac.init(macKey);
+    var computed = hmac.doFinal(id.getBytes(UTF_8));
+
+    for (var caveat : caveats) {
+        hmac.init(new SecretKeySpec(computed, "HmacSHA256"));   // 用旧 tag 当新 key
+        computed = hmac.doFinal(caveat.getBytes(UTF_8));
+    }
+    return MessageDigest.isEqual(tag, computed);   // 常数时间比较
+}</code></pre>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 永远不要信任 caveat 里写的内容</div>
+      <p>因为任何人都能追加 caveat（不需要密钥），所以 caveat 只能被用来<strong>收紧</strong>权限，绝不能反过来当作"证明"去<strong>放宽</strong>权限或者授予额外访问。校验方必须自己对每一种 caveat 写好判断逻辑（比如"当前时间是不是真的早于 caveat 里写的过期时间"），而不是看到 caveat 里写着什么就直接采信。</p>
+    </div>
+
+    <h2 id="s7"><span class="num">9.3.2</span>Macaroon Token Store 的实现</h2>
+
+    <p>在 Java 项目里，macaroon 功能是通过真实存在、维护中的开源库 <a href="https://github.com/nitram509/jmacaroons" target="_blank" rel="noopener">jmacaroons</a>（Maven 坐标 <code class="inline">com.github.nitram509:jmacaroons</code>）实现的，本章项目的 <code class="inline">pom.xml</code> 里已经声明了这个依赖。<code class="inline">MacaroonTokenStore</code> 的设计和第 5、6 章的 <code class="inline">HmacTokenStore</code> 如出一辙：包一层已有的 <code class="inline">TokenStore</code>（这里用的是 <code class="inline">DatabaseTokenStore</code>），自己只负责"把底层生成的标识符签成一个 macaroon"和"验证 macaroon 签名后再委托底层查表"。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/token/MacaroonTokenStore.java（节选）</div>
+        <pre><code>public class MacaroonTokenStore implements SecureTokenStore {
+    private final TokenStore delegate;
+    private final Key macKey;
+
+    public static SecureTokenStore wrap(
+            ConfidentialTokenStore tokenStore, Key macKey) {
+        return new MacaroonTokenStore(tokenStore, macKey);
+    }
+
+    public static AuthenticatedTokenStore wrap(
+            TokenStore tokenStore, Key macKey) {
+        return new MacaroonTokenStore(tokenStore, macKey);
+    }
+
+    @Override
+    public String create(Request request, Token token) {
+        // 先用底层 store（DatabaseTokenStore）生成一个普通标识符，
+        // 再用密钥把它签成一个 macaroon —— macaroon 只是"包了一层签名"的标识符。
+        var identifier = delegate.create(request, token);
+        var macaroon = MacaroonsBuilder.create("",
+                macKey.getEncoded(), identifier);
+        return macaroon.serialize();
+    }
+
+    @Override
+    public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        var macaroon = MacaroonsBuilder.deserialize(tokenId);
+
+        var verifier = new MacaroonsVerifier(macaroon);
+        verifier.satisfyGeneral(new TimestampCaveatVerifier());
+        verifier.satisfyExact("method = " + request.requestMethod());
+        verifier.satisfyGeneral(new SinceVerifier(request));
+
+        if (verifier.isValid(macKey.getEncoded())) {
+            return delegate.read(request, macaroon.identifier);
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public void revoke(Request request, String tokenId) {
+        var macaroon = MacaroonsBuilder.deserialize(tokenId);
+        delegate.revoke(request, macaroon.identifier);
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">capabilities/macaroon_store.py（教学示例 · 使用 pymacaroons）</div>
+        <pre><code># pip install pymacaroons —— 真实存在、和 jmacaroons 同源算法的 Python 库
+from pymacaroons import Macaroon, Verifier
+from django.conf import settings
+
+MAC_KEY = settings.MACAROON_KEY  # bytes，从密钥库/环境变量加载
+
+def create_macaroon(delegate_identifier: str) -> str:
+    m = Macaroon(location="", identifier=delegate_identifier, key=MAC_KEY)
+    return m.serialize()
+
+def read_macaroon(serialized: str, request):
+    m = Macaroon.deserialize(serialized)
+
+    verifier = Verifier()
+    verifier.satisfy_general(check_expiry_caveat)
+    verifier.satisfy_exact(f"method = {request.method}")
+    verifier.satisfy_general(lambda c: check_since_caveat(c, request))
+
+    try:
+        verifier.verify(m, MAC_KEY)
+    except Exception:
+        return None
+    return CapabilityToken.objects.filter(token_id=m.identifier).first()
+
+def revoke_macaroon(serialized: str):
+    m = Macaroon.deserialize(serialized)
+    CapabilityToken.objects.filter(token_id=m.identifier).delete()</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/lib/macaroon.ts（教学示例 · 手写 HMAC 链）</div>
+        <pre><code>// JS/TS 生态里没有像 jmacaroons、pymacaroons 那样成熟、维护良好的
+// macaroon 库（社区里有 Canonical 维护的 js-macaroon，但文档和生态都薄弱得多），
+// 这里按 9.3.2 节同样的算法手写一个等价实现——核心就是反复做 HMAC-SHA256。
+import { createHmac, timingSafeEqual } from 'node:crypto'
+
+function hmac(key: Buffer, data: string): Buffer {
+  return createHmac('sha256', key).update(data, 'utf8').digest()
+}
+
+export function createMacaroon(identifier: string, macKey: Buffer): string {
+  const tag0 = hmac(macKey, identifier)
+  return toBase64Url(JSON.stringify(
+    { id: identifier, caveats: [], tag: tag0.toString('base64url') }))
+}
+
+export function readMacaroon(
+  serialized: string, macKey: Buffer, checks: ((caveat: string) => boolean)[],
+) {
+  const { id, caveats, tag } = JSON.parse(fromBase64Url(serialized)) as
+    { id: string; caveats: string[]; tag: string }
+
+  let computed = hmac(macKey, id)
+  for (const caveat of caveats) {
+    computed = hmac(computed, caveat)   // 用上一步的 tag 当新的 HMAC key
+    if (!checks.some((check) => check(caveat))) return null
+  }
+  const ok = timingSafeEqual(computed, Buffer.from(tag, 'base64url'))
+  return ok ? { id, caveats } : null
+}</code></pre>
+      </div>
+    </div>
+
+    <p>把它接到 <code class="inline">CapabilityController</code> 上之后，创建空间时返回的能力 URI 里，<code class="inline">access_token</code> 就变成了一整个 macaroon 序列化后的字符串（比原来 <code class="inline">DatabaseTokenStore</code> 单独生成的短 token 要长不少，因为里面带着签名和潜在的 caveat）。</p>
+
+    <h2 id="s8"><span class="num">9.3.3</span>第一方 caveat：本地就能核实的限制条件</h2>
+
+    <div class="callout note">
+      <div class="title">💡 第一方 vs 第三方，一句话区分</div>
+      <p><strong>第一方 caveat</strong>就是一段普通字符串，API 自己就能核实（比如"必须在某个时间点之前使用""必须是 GET 请求"）。<strong>第三方 caveat</strong>（下一节讲）需要客户端去找一个外部服务证明条件成立，再把证明带回来。</p>
+    </div>
+
+    <p>校验器（verifier）需要 API 提前注册好——遇到一条不认识的 caveat，macaroon 直接判定为无效，这一点和 OAuth2 的 scope 有点像：具体支持哪些 caveat，全靠 API 自己定义。项目里注册了三种校验器：内置的 <code class="inline">TimestampCaveatVerifier</code>（校验形如 <code class="inline">time &lt; 2019-10-12T12:00:00Z</code> 的过期时间）、用 <code class="inline">satisfyExact</code> 做的精确字符串匹配（把 macaroon 限制在某一种 HTTP 方法上）、以及自己实现 <code class="inline">GeneralCaveatVerifier</code> 接口写的 <code class="inline">SinceVerifier</code>（校验形如 <code class="inline">since &gt; 2019-10-12T12:00:00Z</code> 的"只能看这个时间点之后的消息"）。</p>
+
+    <p>追加 caveat 这一侧则非常轻量——不需要任何密钥，几行代码就能做到。项目里专门写了一个独立的命令行小工具 <code class="inline">CaveatAppender</code>，读入一个 macaroon 字符串和若干条 caveat，逐条追加后打印出新的 macaroon：</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">ch09/.../token/MacaroonTokenStore.java（SinceVerifier）+ ch09/.../CaveatAppender.java</div>
+        <pre><code>private static class SinceVerifier implements GeneralCaveatVerifier {
+    private final Request request;
+
+    private SinceVerifier(Request request) {
+        this.request = request;
+    }
+
+    @Override
+    public boolean verifyCaveat(String caveat) {
+        if (caveat.startsWith("since > ")) {
+            var minSince = Instant.parse(caveat.substring(8));
+            var reqSince = Instant.now().minus(1, ChronoUnit.DAYS);
+            if (request.queryParams("since") != null) {
+                reqSince = Instant.parse(request.queryParams("since"));
+            }
+            return reqSince.isAfter(minSince);
+        }
+        return false;   // 不认识的 caveat 一律拒绝
+    }
+}
+
+// CaveatAppender.java —— 客户端小工具：不需要服务器密钥就能加限制
+public class CaveatAppender {
+    public static void main(String... args) {
+        var builder = new MacaroonsBuilder(deserialize(args[0]));
+        for (int i = 1; i &lt; args.length; ++i) {
+            builder.add_first_party_caveat(args[i]);
+        }
+        System.out.println(builder.getMacaroon().serialize());
+    }
+}</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">capabilities/caveat_checks.py + caveat_appender.py（教学示例）</div>
+        <pre><code># capabilities/caveat_checks.py —— 供 macaroon_store.py 里的 Verifier 调用
+from datetime import datetime, timezone, timedelta
+
+def check_expiry_caveat(caveat: str) -> bool:
+    if caveat.startswith("time &lt; "):
+        deadline = datetime.fromisoformat(caveat[7:])
+        return datetime.now(timezone.utc) &lt; deadline
+    return False
+
+def check_since_caveat(caveat: str, request) -> bool:
+    if caveat.startswith("since > "):
+        min_since = datetime.fromisoformat(caveat[8:])
+        req_since = request.GET.get(
+            "since", datetime.now(timezone.utc) - timedelta(days=1))
+        return req_since > min_since
+    return False
+
+
+# caveat_appender.py —— 客户端小工具：同样不需要服务器密钥
+import sys
+from pymacaroons import Macaroon
+
+m = Macaroon.deserialize(sys.argv[1])
+for caveat in sys.argv[2:]:
+    m.add_first_party_caveat(caveat)
+print(m.serialize())</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/lib/macaroon-client.ts（教学示例 · 浏览器端追加 caveat）</div>
+        <pre><code>// 浏览器里用 Web Crypto（SubtleCrypto）实现同样的"用旧 tag 当新 key"，
+// 完全不需要接触服务器的密钥，几行代码就能做到，和 Java 版的 CaveatAppender 对应。
+async function hmacKeyFromTag(tag: Uint8Array): Promise&lt;CryptoKey&gt; {
+  return crypto.subtle.importKey(
+    'raw', tag, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+}
+
+export async function addCaveat(mac: SerializedMacaroon, caveat: string) {
+  const oldTag = fromBase64Url(mac.tag)
+  const key = await hmacKeyFromTag(oldTag)
+  const sig = await crypto.subtle.sign(
+    'HMAC', key, new TextEncoder().encode(caveat))
+  return {
+    id: mac.id,
+    caveats: [...mac.caveats, caveat],
+    tag: toBase64Url(new Uint8Array(sig)),
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <p>试一下效果：先创建一个空间拿到能力 URI，用 <code class="inline">CaveatAppender</code> 追加一条一分钟后过期的 <code class="inline">time</code> caveat，用新 token 访问没问题；一分钟之后再用同一个新 token 访问，服务器会返回 <code class="inline">403 Forbidden</code>——但原始那个没加过期限制的 token 仍然完全正常，因为 caveat 只影响追加了它的那一份 macaroon 副本，不会"污染"原始 token。这正是<strong>上下文相关 caveat（contextual caveat）</strong>的价值：客户端在把 token 发到一个不那么可信的信道之前，可以现场加一条"5 秒内只能 PUT 这个 URL"之类的限制，就算这份临时受限的 token 被截获，损失也被死死框住了。</p>
+
+    <h2 id="s9"><span class="num">9.3.4</span>第三方 caveat：需要外部服务盖章的限制条件</h2>
+
+    <p>第一方 caveat 已经很好用了，但有些限制条件 API 自己没法核实，比如"这个人是不是某公司的员工""这个人是不是年满 18 岁"。这时候需要引入<strong>第三方 caveat</strong>：不再是 API 自己判断，而是要求客户端去联系一个第三方服务，拿到一份<strong>discharge macaroon（免除凭证）</strong>作为"条件已满足"的证明，再和原始 macaroon 一起交给 API。两份 macaroon 用密码学方式绑在一起，API 全程不需要直接和第三方服务通信，就能确认条件确实满足了。</p>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 760 360" role="img" aria-label="第三方 caveat 验证流程：客户端向第三方服务换取 discharge macaroon 后一并提交给 API">
+        <defs>
+          <marker id="arrowD6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/>
+          </marker>
+        </defs>
+        <rect x="20" y="10" width="160" height="36" rx="8" fill="#2563eb"/>
+        <text x="100" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">客户端</text>
+        <rect x="300" y="10" width="160" height="36" rx="8" fill="#16a34a"/>
+        <text x="380" y="33" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Natter API</text>
+        <rect x="580" y="10" width="160" height="36" rx="8" fill="#0891b2"/>
+        <text x="660" y="33" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">第三方授权服务</text>
+
+        <line x1="100" y1="46" x2="100" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="380" y1="46" x2="380" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+        <line x1="660" y1="46" x2="660" y2="300" stroke="#e2e5ee" stroke-width="2"/>
+
+        <line x1="100" y1="90" x2="380" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD6)"/>
+        <text x="240" y="80" text-anchor="middle" font-size="11" fill="#1c2333">① 请求资源，macaroon 里有一条未满足的第三方 caveat</text>
+
+        <line x1="380" y1="140" x2="100" y2="140" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD6)"/>
+        <text x="240" y="130" text-anchor="middle" font-size="11" fill="#1c2333">② 需要去 auth.example.com 核实，附上 caveat 的 identifier</text>
+
+        <line x1="100" y1="190" x2="660" y2="190" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD6)"/>
+        <text x="380" y="180" text-anchor="middle" font-size="11" fill="#1c2333">③ 带着 identifier 联系第三方服务，证明条件成立（如登录 SSO）</text>
+
+        <line x1="660" y1="240" x2="100" y2="240" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD6)"/>
+        <text x="380" y="230" text-anchor="middle" font-size="11" fill="#1c2333">④ 条件满足 → 签发 discharge macaroon（用同一把 caveat 密钥签名）</text>
+
+        <line x1="100" y1="290" x2="380" y2="290" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowD6)"/>
+        <text x="240" y="280" text-anchor="middle" font-size="11" fill="#1c2333">⑤ 把 discharge macaroon 绑定后和原始 macaroon 一起提交</text>
+
+        <rect x="240" y="304" width="280" height="44" rx="8" fill="#d97706"/>
+        <text x="380" y="322" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">⑥ API 用本地的 caveat 密钥验证 discharge 签名，</text>
+        <text x="380" y="338" text-anchor="middle" fill="#fff" font-size="11">对得上就放行——全程没有直接联系第三方服务</text>
+      </svg>
+      <figcaption>图 9-6：第三方 caveat 的验证流程——discharge macaroon 是"条件已满足"的密码学证明</figcaption>
+    </figure>
+
+    <p>一条第三方 caveat 由三部分组成：一个告诉客户端"去哪里核实"的 <strong>location hint</strong>（不受签名保护，只是提示，不可信）、一个高熵的<strong>共享密钥</strong>（第三方服务将用它给 discharge macaroon 签名，这段密钥会被加密后嵌进 caveat）、以及一个公开的<strong>identifier</strong>（第三方服务凭它查出这次要核实的是什么条件，本身不能泄漏密钥）。</p>
+
+    <div class="code-compare">
+      <div class="tab-bar">
+        <button class="tab-btn" data-lang="java">Java <span class="fw">· Spark（原书）</span></button>
+        <button class="tab-btn" data-lang="python">Python <span class="fw">· Django</span></button>
+        <button class="tab-btn" data-lang="js">TypeScript <span class="fw">· Hono.js</span></button>
+      </div>
+      <div class="tab-panel" data-lang="java">
+        <div class="file-path">书中示例 · jmacaroons 的第三方 caveat API（未包含在本项目源码里）</div>
+        <pre><code>var secret = new byte[32];
+new SecureRandom().nextBytes(secret);
+
+macaroon = MacaroonsBuilder.modify(macaroon)
+        .add_third_party_caveat("https://auth.example.com", secret, caveatId)
+        .getMacaroon();</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="python">
+        <div class="file-path">capabilities/third_party.py（教学示例 · 使用 pymacaroons）</div>
+        <pre><code># 加 caveat 这一端（API 或客户端）：
+secret = secrets.token_bytes(32)
+m.add_third_party_caveat("https://auth.example.com", secret, caveat_id)
+
+# 第三方授权服务那一端：核实条件后签发一份 discharge macaroon
+def issue_discharge(caveat_key: bytes, caveat_id: str) -> str:
+    discharge = Macaroon(location="https://auth.example.com",
+                          identifier=caveat_id, key=caveat_key)
+    discharge.add_first_party_caveat("employee = true")
+    return discharge.serialize()
+
+# API 这一端：把客户端拿回来的 discharge macaroon 绑定后一起校验
+discharge = Macaroon.deserialize(discharge_serialized)
+bound = m.prepare_for_request(discharge)
+verifier.verify(m, MAC_KEY, discharge_macaroons=[bound])</code></pre>
+      </div>
+      <div class="tab-panel" data-lang="js">
+        <div class="file-path">src/lib/third-party-caveat.ts（示意，非完整实现）</div>
+        <pre><code>// 手写第三方 caveat 相当于自己重新实现一套公钥加密协议，
+// 这里只画出结构，说明它比第一方 caveat 复杂得多，不建议直接照抄到生产环境。
+type ThirdPartyCaveat = {
+  location: string   // 去哪个第三方服务核实
+  caveatId: string    // 第三方用来查出是哪一次核实请求（公开，不含密钥明文）
+}
+
+// 追加时：用第三方的公钥加密 { secret, query }，密文当作 caveatId
+// 核实时：API 拿本地保存的 secret，验证 discharge macaroon 的 HMAC 链是否对得上
+async function addThirdPartyCaveat(mac: SerializedMacaroon, tp: ThirdPartyCaveat) {
+  // ……结构示意，具体的加密与绑定逻辑略
+  return { ...mac, thirdParty: tp }
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="title">✅ 第三方 caveat 好在哪里</div>
+      <p>API 不需要直接和第三方服务打交道；第三方服务看不到客户端到底在访问哪个具体资源（只看到一个不透明的 identifier），保护了隐私；discharge macaroon 本身又是一份 macaroon，第三方服务还能继续在它上面加更多第一方甚至第三方 caveat（比如"这份授权只在接下来 5 分钟内有效"）。书中提到的一个典型场景是银行转账：客户端长期持有一份能发起付款的 macaroon，每一笔具体转账都要求带上一个"经过独立交易授权服务确认"的第三方 caveat，避免长期 token 被盗后被直接拿去转账。</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="title">⚠️ 生态现状：没有统一标准</div>
+      <p>第三方 caveat 目前没有关于 identifier 格式、加密算法、客户端怎么联系第三方服务的统一标准，各家实现各自为政，所以在实践中主要用在同一个团队/公司内部自己掌控两端的封闭生态里，而不是跨组织的开放场景。</p>
+    </div>
+
+    <h2 id="s10">本章小结</h2>
+
+    <table>
+      <thead>
+        <tr><th>机制</th><th>解决的问题</th><th>关键点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>能力 URI</td><td>想分享一条消息，又不想把整个空间的权限都给出去</td><td>权限编码进 token 本身，而不是查身份表；拿到就是有权限</td></tr>
+        <tr><td>HATEOAS</td><td>客户端怎么知道下一步该访问哪个 URL</td><td>响应体里直接给出下一跳的能力链接，不需要客户端自己拼路径</td></tr>
+        <tr><td>fragment / web-key</td><td>能力 URI 在浏览器里可能被日志、Referer、历史记录泄漏</td><td>token 放进 <code class="inline">#</code> 片段，前端 JS 再挪到查询参数发给 API</td></tr>
+        <tr><td>能力 + 身份绑定</td><td>能力 URI 泄漏后任何人都能用；还要防 CSRF</td><td>把 token 的 <code class="inline">username</code> 和登录用户绑定，cookie 与 token 缺一不可</td></tr>
+        <tr><td>Macaroon</td><td>现成的能力 URI 权限粒度不够细</td><td>用 HMAC 链追加 caveat，谁都能"收紧"权限，没人能"放宽"</td></tr>
+        <tr><td>第一方 caveat</td><td>简单、本地就能判断的限制（过期时间、HTTP 方法）</td><td>API 自己写 verifier，逐条核对字符串条件</td></tr>
+        <tr><td>第三方 caveat</td><td>需要外部服务背书的限制（如"是否本公司员工"）</td><td>客户端换取一份 discharge macaroon，绑定后一起提交</td></tr>
+      </tbody>
+    </table>
+
+    <div class="chapter-nav">
+      <a class="prev" href="../ch08/tutorial.html"><span class="lbl">上一章</span><span class="ttl">← 第 8 章：基于身份的访问控制</span></a>
+      <a class="next" href="../ch10/tutorial.html"><span class="lbl">下一章</span><span class="ttl">第 10 章：Kubernetes 中的微服务 API →</span></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/tutorial.js"></script>
+</body>
+</html>
