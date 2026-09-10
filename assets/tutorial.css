@@ -165,23 +165,41 @@ strong { color: var(--text); }
 .callout p:last-child { margin-bottom: 0; }
 
 /* ---------- 图表容器 ---------- */
+/* SVG 图里的颜色都是按浅色底设计的，所以图表画布在深色模式下也保持浅色，避免深色文字"隐身"。 */
 figure.diagram {
   margin: 24px 0;
-  padding: 18px;
-  background: var(--bg-alt);
+  padding: 14px;
+  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow-x: auto;
 }
-figure.diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+figure.diagram svg { display: block; margin: 0 auto; width: 100%; height: auto; }
 figure.diagram figcaption {
   text-align: center;
   font-size: 13px;
-  color: var(--text-dim);
+  color: #5b6478;
   margin-top: 10px;
 }
 .diagram text { font-family: var(--font-sans); }
+.diagram text[font-size="9"],
+.diagram text[font-size="9.5"],
+.diagram text[font-size="10"],
+.diagram text[font-size="10.5"] { font-size: 11px; }
+
+/* 深色文字加一圈与画布同色的描边，箭头或连线从文字后面穿过时不再糊住字形；白色/浅色字在彩色方块里，不加。 */
+.diagram svg text:not([fill="#fff"]):not([fill="#ffffff"]):not([fill="white"]):not([fill="#e6edff"]):not([fill="#ece5ff"]) {
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+@media (prefers-color-scheme: dark) {
+  figure.diagram { background: #f4f6fa; border-color: #394260; }
+  .diagram svg text:not([fill="#fff"]):not([fill="#ffffff"]):not([fill="white"]):not([fill="#e6edff"]):not([fill="#ece5ff"]) { stroke: #f4f6fa; }
+}
 
 /* ---------- 图例 ---------- */
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--text-dim); margin-top: 8px; justify-content: center; }

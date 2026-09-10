@@ -166,10 +166,10 @@ Spark.staticFiles.location("/public");</code></pre>
         <text class="flow-label" x="320" y="213" text-anchor="middle">POST /spaces（带上 token）</text>
 
         <!-- lookup -->
-        <line x1="555" y1="200" x2="555" y2="140" class="flow-arrow" marker-end="url(#arrow1)"/>
-        <circle class="step-circle" cx="555" cy="200" r="10"/>
-        <text class="step-num" x="555" y="204" text-anchor="middle">5</text>
-        <text class="flow-label" x="590" y="203" text-anchor="start">查 token 是否有效</text>
+        <line x1="555" y1="206" x2="555" y2="182" class="flow-arrow" marker-end="url(#arrow1)"/>
+        <circle class="step-circle" cx="555" cy="206" r="10"/>
+        <text class="step-num" x="555" y="210" text-anchor="middle">5</text>
+        <text class="flow-label" x="590" y="210" text-anchor="start">查 token 是否有效</text>
 
         <text x="320" y="260" text-anchor="middle" font-size="12.5" fill="#5b6478">服务器不需要再次验证密码，只需要在存储里查一次 token</text>
       </svg>
@@ -423,7 +423,7 @@ export default sessions;</code></pre>
 
         <line x1="85" y1="260" x2="340" y2="260" class="flow-arrow" marker-end="url(#arrow3)"/>
         <circle class="step-circle" cx="95" cy="260" r="10"/><text class="step-num" x="95" y="264" text-anchor="middle">4</text>
-        <text class="flow-label" x="210" y="253" text-anchor="middle">带 session=abc 请求 → 以受害者身份通过！</text>
+        <text class="flow-label" x="224" y="253" text-anchor="middle">带 session=abc 请求 → 以受害者身份通过！</text>
       </svg>
       <figcaption>图 4-3：会话固定攻击——攻击者预先拿到一个 session token，诱导受害者用这个 token 登录，登录后攻击者手里的旧 token 也变成了合法凭证</figcaption>
     </figure>
@@ -747,11 +747,11 @@ $ curl -b /tmp/cookies -H 'Content-Type: application/json' \
 
         <line x1="90" y1="160" x2="340" y2="160" class="flow-arrow" marker-end="url(#arrow6)"/>
         <circle class="step-circle" cx="100" cy="160" r="10"/><text class="step-num" x="100" y="164" text-anchor="middle">3</text>
-        <text class="flow-label" x="215" y="153" text-anchor="middle">JS 把 abc 存进不带 HttpOnly 的 csrfToken Cookie</text>
+        <text class="flow-label" x="225" y="137" text-anchor="middle">JS 把 abc 存进 csrfToken Cookie</text><text class="flow-label" x="225" y="153" text-anchor="middle">（不带 HttpOnly，JS 才能读取）</text>
 
         <line x1="90" y1="200" x2="340" y2="200" class="flow-arrow" marker-end="url(#arrow6)" stroke="#16a34a"/>
         <circle class="step-circle" cx="100" cy="200" r="10" stroke="#16a34a"/><text class="step-num" x="100" y="204" text-anchor="middle" fill="#16a34a">4</text>
-        <text class="flow-label" x="215" y="193" text-anchor="middle" fill="#16a34a" font-weight="600">请求带 Cookie:session=xyz + Header:X-CSRF-Token=abc</text>
+        <text class="flow-label" x="225" y="180" text-anchor="middle" fill="#16a34a" font-weight="600">请求带 Cookie: session=xyz</text><text class="flow-label" x="225" y="194" text-anchor="middle" fill="#16a34a" font-weight="600">+ Header: X-CSRF-Token=abc</text>
 
         <line x1="340" y1="230" x2="90" y2="230" class="flow-arrow" marker-end="url(#arrow6)" stroke="#16a34a"/>
         <text class="flow-label" x="215" y="223" text-anchor="middle" fill="#16a34a" font-weight="600">SHA-256(xyz)==abc ✓ → 放行</text>

@@ -294,7 +294,7 @@
         <text x="685" y="47" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="600">服务器</text>
         <line x1="465" y1="58" x2="465" y2="330" stroke="#e2e5ee" stroke-width="2"/>
         <line x1="685" y1="58" x2="685" y2="330" stroke="#e2e5ee" stroke-width="2"/>
-        <text x="575" y="72" text-anchor="middle" font-size="10.5" fill="#5b6478">（双方出厂时已共享同一把 PSK）</text>
+        <text x="575" y="304" text-anchor="middle" font-size="10.5" fill="#5b6478">前提：双方出厂时已共享同一把 PSK</text>
 
         <circle cx="450" cy="90" r="9" fill="#2563eb"/><text x="450" y="94" text-anchor="middle" font-size="9.5" fill="#fff">1</text>
         <line x1="465" y1="90" x2="685" y2="90" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowC)"/>
@@ -813,8 +813,8 @@ const plaintext = await siv.open(ciphertext, [header, randomIv]);</code></pre>
         <line x1="585" y1="60" x2="653" y2="60" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrowG)"/>
         <text x="619" y="52" text-anchor="middle" font-size="9.5" fill="#5b6478">HKDF</text>
 
-        <text x="380" y="30" text-anchor="middle" font-size="14" fill="#d97706">⚡</text>
-        <text x="380" y="98" text-anchor="middle" font-size="10.5" fill="#d97706">此处密钥泄露</text>
+        
+        <text x="380" y="98" text-anchor="middle" font-size="10.5" fill="#d97706">⚡ 此处密钥泄露</text>
 
         <line x1="15" y1="112" x2="265" y2="112" stroke="#16a34a" stroke-width="2"/>
         <line x1="15" y1="106" x2="15" y2="118" stroke="#16a34a" stroke-width="2"/>

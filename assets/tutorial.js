@@ -28,7 +28,17 @@
     setActiveLang(btn.getAttribute("data-lang"));
   });
 
+  // 图表最多缩到原始尺寸的 90%，再窄就在图框内横向滚动，避免文字被缩得看不清。
+  function setDiagramMinWidth() {
+    document.querySelectorAll("figure.diagram svg[viewBox]").forEach(function (svg) {
+      var vb = svg.getAttribute("viewBox").trim().split(/[\s,]+/);
+      var w = parseFloat(vb[2]);
+      if (w > 0) svg.style.minWidth = Math.round(w * 0.9) + "px";
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    setDiagramMinWidth();
     var saved = null;
     try { saved = localStorage.getItem("apisec-tutorial-lang"); } catch (e) {}
     setActiveLang(saved || "java");

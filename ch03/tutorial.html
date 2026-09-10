@@ -1072,10 +1072,10 @@ app.delete("/spaces/:spaceId/messages/:msgId", deletePost);</code></pre>
         <text x="245" y="62" text-anchor="middle" font-size="11" fill="#1c2333">① POST /users {username:'evildemo2',...} → 201 Created</text>
 
         <line x1="110" y1="112" x2="380" y2="112" stroke="#d97706" stroke-width="1.5" marker-end="url(#f7-arrowWarn)"/>
-        <text x="245" y="104" text-anchor="middle" font-size="11" fill="#d97706">② POST /spaces/1/members {username:'evildemo2', permissions:'rwd'}</text>
+        <text x="245" y="104" text-anchor="middle" font-size="11" fill="#d97706">② POST /spaces/1/members</text><text x="245" y="128" text-anchor="middle" font-size="11" fill="#d97706">{username:'evildemo2', permissions:'rwd'}</text>
 
         <line x1="400" y1="150" x2="655" y2="150" stroke="#dc2626" stroke-width="1.5" marker-end="url(#f7-arrowRed)"/>
-        <text x="527" y="142" text-anchor="middle" font-size="10.5" fill="#dc2626">③ requirePermission("POST","r") 检查 demo2 → 含 r，通过 ✔（漏洞）</text>
+        <text x="527" y="128" text-anchor="middle" font-size="10.5" fill="#dc2626">③ requirePermission("POST","r")</text><text x="527" y="143" text-anchor="middle" font-size="10.5" fill="#dc2626">检查 demo2 → 含 r，通过 ✔（漏洞）</text>
 
         <line x1="400" y1="190" x2="655" y2="190" stroke="#5b6478" stroke-width="1.5" marker-end="url(#f7-arrow)"/>
         <text x="527" y="182" text-anchor="middle" font-size="10.5" fill="#1c2333">④ INSERT permissions(space=1, user='evildemo2', perms='rwd')</text>

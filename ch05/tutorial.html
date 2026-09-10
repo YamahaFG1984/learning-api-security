@@ -778,13 +778,13 @@ CORS_ALLOW_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
         <text x="530" y="45" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">攻击者服务器</text>
         <text x="530" y="65" text-anchor="middle" fill="#fff" font-size="11">GET /exfil?token=xyz</text>
 
-        <line x1="530" y1="80" x2="530" y2="150" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5b)"/>
+        <line x1="530" y1="80" x2="530" y2="174" stroke="#5b6478" stroke-width="1.5" marker-end="url(#arrow5b)"/>
         <text x="560" y="115" font-size="11" fill="#1c2333">② 攻击者从</text>
         <text x="560" y="130" font-size="11" fill="#1c2333">访问日志里</text>
         <text x="560" y="145" font-size="11" fill="#1c2333">拿到 Token，</text>
         <text x="560" y="160" font-size="11" fill="#1c2333">直接冒充用户</text>
-        <rect x="440" y="160" width="180" height="34" rx="6" fill="#16a34a"/>
-        <text x="530" y="182" text-anchor="middle" fill="#fff" font-size="12">Natter API（受害）</text>
+        <rect x="440" y="178" width="180" height="34" rx="6" fill="#16a34a"/>
+        <text x="530" y="200" text-anchor="middle" fill="#fff" font-size="12">Natter API（受害）</text>
       </svg>
       <figcaption>图 5-3：XSS 漏洞下，攻击者脚本读取 localStorage 中的 Token 并通过图片请求"打包快递"给自己的服务器，之后就能直接拿着窃得的 Token 访问 API。</figcaption>
     </figure>

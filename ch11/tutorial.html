@@ -806,15 +806,15 @@ export const dbConfig = {
         <text x="350" y="207" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">新 Pod</text>
 
         <line x1="160" y1="52" x2="272" y2="52" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a5-1)"/>
-        <text x="216" y="42" text-anchor="middle" font-size="11.5" fill="#1c2333">① 通知“有新 Pod 创建”</text>
+        <text x="220" y="22" text-anchor="middle" font-size="11.5" fill="#1c2333">① 通知“有新 Pod 创建”</text>
 
         <line x1="350" y1="74" x2="350" y2="176" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a5-2)"/>
-        <text x="440" y="128" text-anchor="middle" font-size="11.5" fill="#1c2333">② 控制器用私钥签一个</text>
-        <text x="440" y="142" text-anchor="middle" font-size="11.5" fill="#1c2333">短期 JWT，注入新 Pod</text>
+        <text x="338" y="120" text-anchor="end" font-size="11.5" fill="#1c2333">② 控制器用私钥签一个</text>
+        <text x="338" y="134" text-anchor="end" font-size="11.5" fill="#1c2333">短期 JWT，注入新 Pod</text>
 
         <line x1="420" y1="196" x2="533" y2="70" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a5-3)"/>
-        <text x="500" y="150" text-anchor="middle" font-size="11.5" fill="#1c2333">③ Pod 用 JWT Bearer</text>
-        <text x="500" y="164" text-anchor="middle" font-size="11.5" fill="#1c2333">许可换正式访问令牌</text>
+        <text x="485" y="150" text-anchor="start" font-size="11.5" fill="#1c2333">③ Pod 用 JWT Bearer</text>
+        <text x="485" y="164" text-anchor="start" font-size="11.5" fill="#1c2333">许可换正式访问令牌</text>
       </svg>
       <figcaption>图 11-5：控制器持有签名私钥并驻留在独立的控制面命名空间，业务 Pod 只拿到一次性、短期有效的 JWT</figcaption>
     </figure>
@@ -823,7 +823,7 @@ export const dbConfig = {
     <p>另一个减少需要分发的密钥数量的思路，是用<strong>密钥派生函数</strong>（KDF）：给定一把主密钥和一个"用途"字符串（context），派生出一把新密钥；不同的 context 派生出完全不同、且互相之间看起来毫无关联的密钥。<strong>HKDF</strong>（HMAC-based KDF）是最常用的实现，本质上就是循环调用 HMAC，把"上一轮的输出 + context 字符串 + 轮次编号"作为下一轮 HMAC 的输入，直到凑够所需的密钥长度。</p>
 
     <figure class="diagram">
-      <svg viewBox="0 0 640 260" role="img" aria-label="HKDF 密钥派生示意图">
+      <svg viewBox="0 0 760 260" role="img" aria-label="HKDF 密钥派生示意图">
         <defs>
           <marker id="a6-1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
           <marker id="a6-2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5b6478"/></marker>
@@ -839,26 +839,26 @@ export const dbConfig = {
 
         <line x1="160" y1="115" x2="242" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-1)"/>
 
-        <rect x="470" y="20" width="150" height="40" rx="6" fill="#7c3aed"/>
-        <text x="545" y="35" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">AES 令牌加密密钥</text>
-        <text x="545" y="49" text-anchor="middle" fill="#fff" font-size="10.5">32 字节</text>
+        <rect x="580" y="20" width="150" height="40" rx="6" fill="#7c3aed"/>
+        <text x="655" y="35" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">AES 令牌加密密钥</text>
+        <text x="655" y="49" text-anchor="middle" fill="#fff" font-size="10.5">32 字节</text>
 
-        <rect x="470" y="95" width="150" height="40" rx="6" fill="#7c3aed"/>
-        <text x="545" y="110" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">Ed25519 签名种子</text>
-        <text x="545" y="124" text-anchor="middle" fill="#fff" font-size="10.5">32 字节</text>
+        <rect x="580" y="95" width="150" height="40" rx="6" fill="#7c3aed"/>
+        <text x="655" y="110" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">Ed25519 签名种子</text>
+        <text x="655" y="124" text-anchor="middle" fill="#fff" font-size="10.5">32 字节</text>
 
-        <rect x="470" y="170" width="150" height="40" rx="6" fill="#7c3aed"/>
-        <text x="545" y="185" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">其他自定义密钥</text>
-        <text x="545" y="199" text-anchor="middle" fill="#fff" font-size="10.5">按需长度</text>
+        <rect x="580" y="170" width="150" height="40" rx="6" fill="#7c3aed"/>
+        <text x="655" y="185" text-anchor="middle" fill="#fff" font-size="11.5" font-weight="600">其他自定义密钥</text>
+        <text x="655" y="199" text-anchor="middle" fill="#fff" font-size="10.5">按需长度</text>
 
-        <line x1="390" y1="105" x2="462" y2="40" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-2)"/>
-        <text x="430" y="70" text-anchor="middle" font-size="10.5" fill="#5b6478">"token-encryption-key"</text>
+        <path d="M390,115 H420 V40 H572" fill="none" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-2)"/>
+        <text x="497" y="34" text-anchor="middle" font-size="10.5" fill="#5b6478">"token-encryption-key"</text>
 
-        <line x1="390" y1="115" x2="462" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-3)"/>
-        <text x="430" y="150" text-anchor="middle" font-size="10.5" fill="#5b6478">"nacl-signing-key-seed"</text>
+        <line x1="390" y1="115" x2="572" y2="115" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-3)"/>
+        <text x="497" y="109" text-anchor="middle" font-size="10.5" fill="#5b6478">"nacl-signing-key-seed"</text>
 
-        <line x1="390" y1="125" x2="462" y2="190" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-4)"/>
-        <text x="430" y="225" text-anchor="middle" font-size="10.5" fill="#5b6478">"&lt;自定义 context&gt;"</text>
+        <path d="M390,115 H420 V190 H572" fill="none" stroke="#5b6478" stroke-width="1.5" marker-end="url(#a6-4)"/>
+        <text x="497" y="184" text-anchor="middle" font-size="10.5" fill="#5b6478">"&lt;自定义 context&gt;"</text>
       </svg>
       <figcaption>图 11-6：同一把主密钥，配上不同的 context 字符串，可以派生出任意多把互相独立、不可逆推的密钥</figcaption>
     </figure>
