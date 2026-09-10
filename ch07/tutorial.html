@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 7 章：OAuth2 与 OpenID Connect · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -80,7 +81,7 @@
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch07/.../controller/TokenController.java（节选）</div>
-        <pre><code>private static final String DEFAULT_SCOPES =
+        <pre><code class="language-java">private static final String DEFAULT_SCOPES =
         "create_space post_message read_message list_messages " +
                 "delete_message add_member";
 
@@ -117,7 +118,7 @@ public Filter requireScope(String method, String requiredScope) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/permissions.py（教学示例，配合 django-oauth-toolkit）</div>
-        <pre><code>from rest_framework.permissions import BasePermission
+        <pre><code class="language-python">from rest_framework.permissions import BasePermission
 
 DEFAULT_SCOPES = ("create_space post_message read_message "
                    "list_messages delete_message add_member")
@@ -137,7 +138,7 @@ class HasScope(BasePermission):
 class RequireCreateSpaceScope(HasScope):
     required_scope = "create_space"</code></pre>
         <div class="file-path">spaces/views.py</div>
-        <pre><code>from oauth2_provider.contrib.rest_framework import OAuth2Authentication
+        <pre><code class="language-python">from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from rest_framework.views import APIView
 from .permissions import RequireCreateSpaceScope
 
@@ -151,7 +152,7 @@ class SpaceListCreateView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/scope.ts</div>
-        <pre><code>import { createMiddleware } from 'hono/factory'
+        <pre><code class="language-typescript">import { createMiddleware } from 'hono/factory'
 import { HTTPException } from 'hono/http-exception'
 
 export const requireScope = (method: string, requiredScope: string) =>
@@ -170,7 +171,7 @@ export const requireScope = (method: string, requiredScope: string) =>
     return next()
   })</code></pre>
         <div class="file-path">src/routes/spaces.ts</div>
-        <pre><code>app.post('/spaces', requireScope('POST', 'create_space'), createSpaceHandler)
+        <pre><code class="language-typescript">app.post('/spaces', requireScope('POST', 'create_space'), createSpaceHandler)
 app.post('/sessions', requireScope('POST', 'full_access'), loginHandler)</code></pre>
       </div>
     </div>
@@ -350,7 +351,7 @@ app.post('/sessions', requireScope('POST', 'full_access'), loginHandler)</code><
       OpenID Connect，也可能是 <code class="inline">/.well-known/openid-configuration</code>）
       发一个 GET 请求，就能拿到一份 JSON，里面列出了所有端点地址：
     </p>
-    <pre class="plain"><code>GET https://as.example.com:8443/.well-known/oauth-authorization-server
+    <pre class="plain"><code class="language-http">GET https://as.example.com:8443/.well-known/oauth-authorization-server
 
 {
   "authorization_endpoint": "https://as.example.com:8443/oauth2/authorize",
@@ -540,7 +541,7 @@ app.post('/sessions', requireScope('POST', 'full_access'), loginHandler)</code><
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">书中 listing 7.4（客户端逻辑，不属于 Natter 资源服务器项目本身）</div>
-        <pre><code>String addPkceChallenge(spark.Request request,
+        <pre><code class="language-java">String addPkceChallenge(spark.Request request,
         String authorizeRequest) throws Exception {
 
     var secureRandom = new java.security.SecureRandom();
@@ -563,7 +564,7 @@ app.post('/sessions', requireScope('POST', 'full_access'), loginHandler)</code><
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/oauth_client.py</div>
-        <pre><code>from authlib.integrations.django_client import OAuth
+        <pre><code class="language-python">from authlib.integrations.django_client import OAuth
 
 oauth = OAuth()
 oauth.register(
@@ -575,7 +576,7 @@ oauth.register(
     ),
 )</code></pre>
         <div class="file-path">accounts/views.py</div>
-        <pre><code>def login_with_natter(request):
+        <pre><code class="language-python">def login_with_natter(request):
     redirect_uri = request.build_absolute_uri("/oauth/callback")
     # authlib 自动生成 state 和 PKCE code_verifier/code_challenge，
     # 存进 session，再拼出 /authorize 重定向
@@ -583,7 +584,7 @@ oauth.register(
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/connect.ts</div>
-        <pre><code>import { OAuth2Client, generateCodeVerifier, generateState } from "arctic"
+        <pre><code class="language-typescript">import { OAuth2Client, generateCodeVerifier, generateState } from "arctic"
 import { setCookie } from "hono/cookie"
 
 const client = new OAuth2Client(
@@ -619,7 +620,7 @@ app.get("/connect/natter", (c) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">参考 RevokeAccessToken.java 的写法自制示例（书中原文用 curl 演示这一步）</div>
-        <pre><code>var tokenEndpoint =
+        <pre><code class="language-java">var tokenEndpoint =
         URI.create("https://as.example.com:8443/oauth2/access_token");
 
 var form = "grant_type=authorization_code" +
@@ -641,7 +642,7 @@ String refreshToken = json.optString("refresh_token", null);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/views.py</div>
-        <pre><code>def oauth_callback(request):
+        <pre><code class="language-python">def oauth_callback(request):
     # authlib 自动校验 state，并把 session 里存的 code_verifier
     # 一起发到 token 端点完成 PKCE 校验
     token = oauth.natter_as.authorize_access_token(request)
@@ -651,7 +652,7 @@ String refreshToken = json.optString("refresh_token", null);</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/connect.ts（续）</div>
-        <pre><code>import { getCookie, setCookie } from "hono/cookie"
+        <pre><code class="language-typescript">import { getCookie, setCookie } from "hono/cookie"
 import { HTTPException } from "hono/http-exception"
 
 app.get("/oauth/callback", async (c) => {
@@ -692,7 +693,7 @@ app.get("/oauth/callback", async (c) => {
         才能把"撤销"这件麻烦事转嫁给客户端。
       </p>
     </div>
-    <pre class="plain"><code>$ curl -d 'grant_type=refresh_token&amp;refresh_token=sBac5bgCLCjWmtjQ8Weji2mCrbI' \
+    <pre class="plain"><code class="language-bash">$ curl -d 'grant_type=refresh_token&amp;refresh_token=sBac5bgCLCjWmtjQ8Weji2mCrbI' \
   -u thirdPartyApp:secret \
   https://as.example.com:8443/oauth2/access_token
 
@@ -739,7 +740,7 @@ app.get("/oauth/callback", async (c) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch07/.../token/OAuth2TokenStore.java（节选，含加固过的 TLS 客户端配置）</div>
-        <pre><code>public OAuth2TokenStore(URI introspectionEndpoint,
+        <pre><code class="language-java">public OAuth2TokenStore(URI introspectionEndpoint,
         String clientId, String clientSecret) {
     this.introspectionEndpoint = introspectionEndpoint;
 
@@ -808,7 +809,7 @@ private Optional&lt;Token&gt; processResponse(JSONObject response) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/introspection.py（教学示例，等价于 django-oauth-toolkit 内部逻辑）</div>
-        <pre><code>import requests
+        <pre><code class="language-python">import requests
 from django.conf import settings
 
 # 只信任 AS 使用的私有 CA，并强制 TLS 1.2+
@@ -839,7 +840,7 @@ def introspect(token: str) -> dict | None:
         "client_id": body.get("client_id"),
     }</code></pre>
         <div class="file-path">tokens/authentication.py</div>
-        <pre><code>from rest_framework.authentication import BaseAuthentication
+        <pre><code class="language-python">from rest_framework.authentication import BaseAuthentication
 from .introspection import introspect
 
 class OAuth2IntrospectionAuthentication(BaseAuthentication):
@@ -854,7 +855,7 @@ class OAuth2IntrospectionAuthentication(BaseAuthentication):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/token/introspection.ts</div>
-        <pre><code>import { Agent, fetch } from "undici"
+        <pre><code class="language-typescript">import { Agent, fetch } from "undici"
 
 // 只信任签发 AS 证书的私有 CA，锁定 TLS 版本
 const asAgent = new Agent({
@@ -886,7 +887,7 @@ export async function introspect(token: string) {
   return { subject: body.sub, scope: body.scope ?? "", clientId: body.client_id }
 }</code></pre>
         <div class="file-path">src/middleware/auth.ts</div>
-        <pre><code>app.use("*", async (c, next) => {
+        <pre><code class="language-typescript">app.use("*", async (c, next) => {
   const header = c.req.header("authorization")
   if (!header?.startsWith("Bearer ")) return next()
   const token = await introspect(header.slice(7))
@@ -938,7 +939,7 @@ export async function introspect(token: string) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch07/.../RevokeAccessToken.java（一个独立命令行工具，节选）</div>
-        <pre><code>public static void main(String...args) throws Exception {
+        <pre><code class="language-java">public static void main(String...args) throws Exception {
     var clientId = args[0];
     var clientSecret = args[1];
     var token = args[2];
@@ -964,7 +965,7 @@ export async function introspect(token: string) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/views.py</div>
-        <pre><code>import requests
+        <pre><code class="language-python">import requests
 
 def logout(request):
     access_token = request.session.pop("natter_access_token", None)
@@ -980,7 +981,7 @@ def logout(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/logout.ts</div>
-        <pre><code>app.post("/logout", async (c) => {
+        <pre><code class="language-typescript">app.post("/logout", async (c) => {
   const accessToken = getCookie(c, "natter_access_token")
   if (accessToken) {
     const credentials = Buffer.from(
@@ -1068,7 +1069,7 @@ def logout(request):
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch07/.../token/SignedJwtAccessTokenStore.java（节选）</div>
-        <pre><code>public SignedJwtAccessTokenStore(String expectedIssuer,
+        <pre><code class="language-java">public SignedJwtAccessTokenStore(String expectedIssuer,
                                  String expectedAudience,
                                  JWSAlgorithm signatureAlgorithm,
                                  URI jwkSetUri) throws MalformedURLException {
@@ -1116,7 +1117,7 @@ public Optional&lt;Token&gt; read(Request request, String tokenId) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/jwt_access.py（教学示例，用 PyJWT + PyJWKClient）</div>
-        <pre><code>import jwt
+        <pre><code class="language-python">import jwt
 from jwt import PyJWKClient
 
 EXPECTED_ISSUER = "https://as.example.com:8443/"
@@ -1146,7 +1147,7 @@ def validate_jwt_access_token(token: str) -> dict | None:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/token/jwtAccessToken.ts</div>
-        <pre><code>import { createRemoteJWKSet, jwtVerify } from "jose"
+        <pre><code class="language-typescript">import { createRemoteJWKSet, jwtVerify } from "jose"
 
 const EXPECTED_ISSUER = "https://as.example.com:8443/"
 const EXPECTED_AUDIENCE = "https://natter.example.com/"
@@ -1181,7 +1182,7 @@ export async function validateJwtAccessToken(token: string) {
       篡改），所以必须先用签名算法签一遍，再用加密算法把整个签名 JWT 包起来，形成"先签名、再加密"
       的嵌套结构，签名和加密要用两把不同的密钥。
     </p>
-    <pre class="plain"><code>{"sub":"alice","iss":"https://as.example.com",...}
+    <pre class="plain"><code class="language-json">{"sub":"alice","iss":"https://as.example.com",...}
         │  ① 用签名私钥（ES256）签名
         ▼
 eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJzdWIi...（一个完整的签名 JWT）
@@ -1366,7 +1367,7 @@ eyJ0eXAiOiJKV1QiLCJlbmMiOiJBMjU2R0NNIiwiYWxnIjo...（嵌套的加密 JWT，即 J
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">书中 listing 7.13（示例逻辑，非 Natter 资源服务器实际文件）</div>
-        <pre><code>var idToken = request.headers("X-ID-Token");
+        <pre><code class="language-java">var idToken = request.headers("X-ID-Token");
 var claims = verifier.process(idToken, null); // 复用 7.4.4 节的签名校验逻辑
 
 if (!expectedIssuer.equals(claims.getIssuer())) {
@@ -1393,7 +1394,7 @@ request.attribute("id_token.claims", claims);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/id_token.py（教学示例）</div>
-        <pre><code>from authlib.jose import jwt as authlib_jwt
+        <pre><code class="language-python">from authlib.jose import jwt as authlib_jwt
 from authlib.jose.errors import JoseError
 
 EXPECTED_ISSUER = "https://as.example.com:8443/"
@@ -1424,7 +1425,7 @@ def validate_id_token(id_token: str, access_token_subject: str,
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/token/idToken.ts</div>
-        <pre><code>import { createRemoteJWKSet, jwtVerify } from "jose"
+        <pre><code class="language-typescript">import { createRemoteJWKSet, jwtVerify } from "jose"
 
 const OP_JWKS = createRemoteJWKSet(new URL("https://as.example.com:8443/oauth2/jwks"))
 const EXPECTED_ISSUER = "https://as.example.com:8443/"
@@ -1473,6 +1474,9 @@ export async function validateIdToken(
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

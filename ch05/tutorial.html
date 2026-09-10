@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 5 章：现代化的基于 Token 的认证 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -100,7 +101,7 @@
 
     <p>服务器通过一组响应头告诉浏览器"允许什么"：</p>
 
-    <pre class="plain"><code>Access-Control-Allow-Origin: https://nat.tr        允许的源（精确值，或 * 通配符）
+    <pre class="plain"><code class="language-http">Access-Control-Allow-Origin: https://nat.tr        允许的源（精确值，或 * 通配符）
 Access-Control-Allow-Credentials: true             是否允许带 Cookie / TLS 客户端证书等凭证
 Access-Control-Allow-Headers: Content-Type, Authorization   预检响应：允许的自定义请求头
 Access-Control-Allow-Methods: GET, POST, DELETE    预检响应：允许的 HTTP 方法
@@ -128,7 +129,7 @@ Vary: Origin                                       告诉缓存这份响应只�
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch05/.../CorsFilter.java</div>
-        <pre><code>class CorsFilter implements Filter {
+        <pre><code class="language-java">class CorsFilter implements Filter {
     private final Set&lt;String&gt; allowedOrigins;
 
     CorsFilter(Set&lt;String&gt; allowedOrigins) {
@@ -166,7 +167,7 @@ before(new CorsFilter(Set.of("https://nat.tr")));</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">settings.py（django-cors-headers）</div>
-        <pre><code># pip install django-cors-headers
+        <pre><code class="language-python"># pip install django-cors-headers
 INSTALLED_APPS = [
     "corsheaders",
     # ...
@@ -194,7 +195,7 @@ CORS_ALLOW_HEADERS = ["content-type", "authorization"]
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/app.ts（hono/cors）</div>
-        <pre><code>import { Hono } from 'hono'
+        <pre><code class="language-typescript">import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
 const app = new Hono()
@@ -215,7 +216,7 @@ app.use('*', cors({
 
     <p>接入到 <code>Main.java</code> 时，顺序很关键——CORS 过滤器要排在限流之后、认证之前：</p>
 
-    <pre class="plain"><code>before((request, response) -> {          // 1. 限流（第 3 章）
+    <pre class="plain"><code class="language-java">before((request, response) -> {          // 1. 限流（第 3 章）
     if (!rateLimiter.tryAcquire()) halt(429);
 });
 before(new CorsFilter(Set.of("https://nat.tr")));   // 2. CORS（本章）
@@ -237,7 +238,7 @@ before(userController::authenticate);                // 3. 认证</code></pre>
 
     <p>Token 的结构很简单：一个 Token ID，加上一组属性（用户名、过期时间等）。Natter 用一张表存放：</p>
 
-    <pre class="plain"><code>CREATE TABLE tokens(
+    <pre class="plain"><code class="language-sql">CREATE TABLE tokens(
     token_id   VARCHAR(100) PRIMARY KEY,
     user_id    VARCHAR(30) NOT NULL,
     expiry     TIMESTAMP NOT NULL,
@@ -260,7 +261,7 @@ CREATE INDEX expired_token_idx ON tokens(expiry);</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch05/.../token/DatabaseTokenStore.java（节选，去掉哈希）</div>
-        <pre><code>public class DatabaseTokenStore implements TokenStore {
+        <pre><code class="language-java">public class DatabaseTokenStore implements TokenStore {
     private final Database database;
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -297,7 +298,7 @@ CREATE INDEX expired_token_idx ON tokens(expiry);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/models.py + tokens/store.py</div>
-        <pre><code># tokens/models.py
+        <pre><code class="language-python"># tokens/models.py
 import secrets
 from django.db import models
 
@@ -333,7 +334,7 @@ def revoke_token(token_id: str) -> None:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/tokens/store.ts（drizzle-orm）</div>
-        <pre><code>import { randomBytes } from 'node:crypto'
+        <pre><code class="language-typescript">import { randomBytes } from 'node:crypto'
 import { db } from '../db'
 import { tokens } from '../db/schema'
 import { eq } from 'drizzle-orm'
@@ -369,7 +370,7 @@ export async function revokeToken(tokenId: string) {
 
     <p>数据库能存 Token 了，但客户端怎么把它带回来？Natter 最初"临时"复用了第 4 章防 CSRF 用的 <code>X-CSRF-Token</code> 头，这显然不合适——Token 现在跟 CSRF 没关系了。标准做法是 RFC 6750 定义的 <b>Bearer</b> 认证方案：</p>
 
-    <pre class="plain"><code>Authorization: Bearer QDAmQ9TStkDCpVK5A9kFowtYn2k</code></pre>
+    <pre class="plain"><code class="language-http">Authorization: Bearer QDAmQ9TStkDCpVK5A9kFowtYn2k</code></pre>
 
     <div class="callout note">
       <div class="title">💡 什么是 Bearer Token</div>
@@ -378,7 +379,7 @@ export async function revokeToken(tokenId: string) {
 
     <p>校验逻辑：检查 <code>Authorization</code> 头是否以 <code>"Bearer "</code>（注意有个空格）开头，取后面的部分作为 Token ID；如果没有这个头，就放行给别的认证方式（比如登录接口用的 HTTP Basic）处理。如果 Token 已过期，返回带 <code>WWW-Authenticate</code> 的 401，标准地告诉客户端"该重新登录了"：</p>
 
-    <pre class="plain"><code>HTTP/1.1 401 Unauthorized
+    <pre class="plain"><code class="language-http">HTTP/1.1 401 Unauthorized
 WWW-Authenticate: Bearer realm="users", error="invalid_token",
         error_description="Token has expired"</code></pre>
 
@@ -390,7 +391,7 @@ WWW-Authenticate: Bearer realm="users", error="invalid_token",
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch05/.../controller/TokenController.java</div>
-        <pre><code>public JSONObject login(Request request, Response response) {
+        <pre><code class="language-java">public JSONObject login(Request request, Response response) {
     String subject = request.attribute("subject");   // Basic 认证已校验过密码
     var expiry = now().plus(10, ChronoUnit.MINUTES);
 
@@ -433,7 +434,7 @@ public JSONObject logout(Request request, Response response) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/authentication.py（DRF 自定义 TokenAuthentication）</div>
-        <pre><code>from datetime import datetime, timezone
+        <pre><code class="language-python">from datetime import datetime, timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from .store import read_token, create_token, revoke_token
@@ -477,7 +478,7 @@ class LogoutView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/bearerAuth.ts（自定义中间件，基于 hono/bearer-auth 思路）</div>
-        <pre><code>import { Context, Next } from 'hono'
+        <pre><code class="language-typescript">import { Context, Next } from 'hono'
 import { createToken, readToken, revokeToken } from '../tokens/store'
 
 // 等价于 Java 的 TokenController.validateToken，
@@ -521,7 +522,7 @@ app.delete('/sessions', async (c) => {         // 登出：撤销 Token
 
     <p>用 <code>curl</code> 试一下（注意登录返回的响应体里已经没有 <code>Set-Cookie</code> 了，Token 直接放在 JSON 里）：</p>
 
-    <pre class="plain"><code>$ curl -i -H 'Content-Type: application/json' -u test:password \
+    <pre class="plain"><code class="language-bash">$ curl -i -H 'Content-Type: application/json' -u test:password \
    -X POST https://localhost:4567/sessions
 HTTP/1.1 201 Created
 Content-Type: application/json
@@ -537,7 +538,7 @@ HTTP/1.1 201 Created</code></pre>
 
     <p>Token 不会自己消失——数据库里的行会一直堆积，既浪费空间，也可能被攻击者利用（反复登录制造大量 Token，撑爆存储，属于一种 DoS）。解决方式很简单：定期跑一条 <code>DELETE</code>：</p>
 
-    <pre class="plain"><code>public void deleteExpiredTokens() {
+    <pre class="plain"><code class="language-java">public void deleteExpiredTokens() {
     var deleted = database.update(
         "DELETE FROM tokens WHERE expiry < current_timestamp");
     logger.info("Deleted {} expired tokens", deleted);
@@ -560,7 +561,7 @@ Executors.newSingleThreadScheduledExecutor()
 
     <p>两者接口一样：<code>setItem(key, value)</code>、<code>getItem(key)</code>、<code>removeItem(key)</code>。相比操作 Cookie 要手写字符串解析，Web Storage 的 API 简单得多：</p>
 
-    <pre class="plain"><code>// 登录成功后保存 Token
+    <pre class="plain"><code class="language-javascript">// 登录成功后保存 Token
 localStorage.setItem('token', json.token);
 
 // 每次请求前取出 Token
@@ -690,7 +691,7 @@ fetch(apiUrl + '/spaces', {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch05/.../CorsFilter.java（去 Cookie 后的版本）</div>
-        <pre><code>@Override
+        <pre><code class="language-java">@Override
 public void handle(Request request, Response response) {
     var origin = request.headers("Origin");
     if (origin != null &amp;&amp; allowedOrigins.contains(origin)) {
@@ -713,7 +714,7 @@ public void handle(Request request, Response response) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">settings.py</div>
-        <pre><code># 改用 Bearer 后，Cookie 相关的开关全部关闭
+        <pre><code class="language-python"># 改用 Bearer 后，Cookie 相关的开关全部关闭
 CORS_ALLOW_CREDENTIALS = False   # 不再需要浏览器自动带凭证
 
 CORS_ALLOWED_ORIGINS = ["https://nat.tr"]
@@ -727,7 +728,7 @@ CORS_ALLOW_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/app.ts</div>
-        <pre><code>app.use('*', cors({
+        <pre><code class="language-typescript">app.use('*', cors({
   origin: ['https://nat.tr'],
   allowMethods: ['GET', 'POST', 'DELETE'],
   allowHeaders: ['Content-Type', 'Authorization'],  // 去掉 X-CSRF-Token
@@ -743,7 +744,7 @@ CORS_ALLOW_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
     <div class="callout danger">
       <div class="title">🚨 攻击示例：用 &lt;img&gt; 标签隐蔽窃取 Token</div>
       <p>攻击者不需要发起显式的网络请求（容易被 CSP 或网络监控发现），只需要动态创建 <code>&lt;img&gt;</code> 元素——浏览器加载图片资源时会自动发起 GET 请求，哪怕这个 <code>&lt;img&gt;</code> 从未被插入到页面里：</p>
-      <pre class="plain"><code>for (var i = 0; i < localStorage.length; ++i) {
+      <pre class="plain"><code class="language-javascript">for (var i = 0; i < localStorage.length; ++i) {
     var key = localStorage.key(i);
     var img = document.createElement('img');
     img.setAttribute('src',
@@ -851,7 +852,7 @@ CORS_ALLOW_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch05/.../token/DatabaseTokenStore.java（加上哈希）</div>
-        <pre><code>import static com.manning.apisecurityinaction.token.CookieTokenStore.sha256;
+        <pre><code class="language-java">import static com.manning.apisecurityinaction.token.CookieTokenStore.sha256;
 
 @Override
 public String create(Request request, Token token) {
@@ -886,7 +887,7 @@ private String hash(String tokenId) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/store.py</div>
-        <pre><code>import hashlib, base64
+        <pre><code class="language-python">import hashlib, base64
 
 def _hash(token_id: str) -> str:
     # SHA-256 足够：Token 本身已有 160 位熵，不需要 Argon2 那种慢哈希
@@ -909,7 +910,7 @@ def revoke_token(token_id: str) -> None:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/tokens/store.ts</div>
-        <pre><code>import { createHash, randomBytes } from 'node:crypto'
+        <pre><code class="language-typescript">import { createHash, randomBytes } from 'node:crypto'
 
 function hash(tokenId: string): string {
   // Web Crypto: crypto.subtle.digest('SHA-256', ...) 也可以，
@@ -1000,7 +1001,7 @@ export async function revokeToken(tokenId: string) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch05/.../token/HmacTokenStore.java</div>
-        <pre><code>public class HmacTokenStore implements TokenStore {
+        <pre><code class="language-java">public class HmacTokenStore implements TokenStore {
     private final TokenStore delegate;     // 包住的是 DatabaseTokenStore
     private final Key macKey;
 
@@ -1046,7 +1047,7 @@ var tokenController = new TokenController(tokenStore);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">tokens/hmac_store.py</div>
-        <pre><code>import hmac as hmac_lib, hashlib, base64
+        <pre><code class="language-python">import hmac as hmac_lib, hashlib, base64
 
 class HmacTokenStore:
     """包住 store.py 里的裸 DatabaseTokenStore 函数"""
@@ -1086,7 +1087,7 @@ class HmacTokenStore:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/tokens/hmacStore.ts</div>
-        <pre><code>import { createHmac, timingSafeEqual } from 'node:crypto'
+        <pre><code class="language-typescript">import { createHmac, timingSafeEqual } from 'node:crypto'
 import * as db from './store'          // 裸的 DatabaseTokenStore 版本
 
 export class HmacTokenStore {
@@ -1131,7 +1132,7 @@ export class HmacTokenStore {
 
     <p>密钥从哪来？绝不能硬编码在代码里，也不能用一个"人类记得住"的密码充当（HMAC 密钥应该是 32 字节的纯随机数据）。Natter 用 Java 自带的 <code>keytool</code> 生成一个 PKCS#12 格式的密钥库文件，运行时通过系统属性传入密码解锁：</p>
 
-    <pre class="plain"><code># 生成一个 256 位的 HMAC 密钥，存进 PKCS#12 密钥库
+    <pre class="plain"><code class="language-bash"># 生成一个 256 位的 HMAC 密钥，存进 PKCS#12 密钥库
 keytool -genseckey -keyalg HmacSHA256 -keysize 256 \
     -alias hmac-key -keystore keystore.p12 \
     -storetype PKCS12 -storepass changeit
@@ -1176,6 +1177,9 @@ $ mvn ... -Dkeystore.password=changeit</code></pre>
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

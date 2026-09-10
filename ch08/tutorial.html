@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 8 章：基于身份的访问控制 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -82,7 +83,7 @@
 
     <p>组最大的好处是：新员工入职时，你只需要把他加进"软件工程师"组，而不用逐条回忆他需要哪些权限；他换岗位时，把他从旧组移出、塞进新组即可。要在 Natter 的数据库里实现"组"，只需要一张记录成员关系的表：</p>
 
-    <pre class="plain"><code>CREATE TABLE group_members(
+    <pre class="plain"><code class="language-sql">CREATE TABLE group_members(
     group_id VARCHAR(30),
     user_id VARCHAR(30) REFERENCES users(user_id)
 );
@@ -152,7 +153,7 @@ CREATE INDEX group_member_user_idx ON group_members(user_id);</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch08/.../controller/LdapUserController.java（节选）</div>
-        <pre><code>public void authenticate(Request request, Response response) {
+        <pre><code class="language-java">public void authenticate(Request request, Response response) {
     var credentials = getCredentials(request);
     if (credentials == null) return;
 
@@ -188,7 +189,7 @@ CREATE INDEX group_member_user_idx ON group_members(user_id);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">settings.py（django-auth-ldap，教学示例）</div>
-        <pre><code># settings.py
+        <pre><code class="language-python"># settings.py
 import ldap
 from django_auth_ldap.config import LDAPSearch, GroupOfNamesType
 
@@ -220,7 +221,7 @@ AUTH_LDAP_MIRROR_GROUPS = True</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/ldapAuth.ts（ldapjs，教学示例）</div>
-        <pre><code>import { Client } from "ldapjs";
+        <pre><code class="language-typescript">import { Client } from "ldapjs";
 import type { MiddlewareHandler } from "hono";
 
 export const ldapAuth: MiddlewareHandler = async (c, next) => {
@@ -329,7 +330,7 @@ export const ldapAuth: MiddlewareHandler = async (c, next) => {
 
     <p>Natter 采用的是第二种做法：保留显式的权限字符（<code>r</code>/<code>w</code>/<code>d</code>），额外建一张表把角色映射到权限组合，这样管理员也能在不碰代码的情况下审查"这个角色到底能干什么"：</p>
 
-    <pre class="plain"><code>CREATE TABLE role_permissions(
+    <pre class="plain"><code class="language-sql">CREATE TABLE role_permissions(
     role_id VARCHAR(30) NOT NULL PRIMARY KEY,
     perms VARCHAR(3) NOT NULL
 );
@@ -353,7 +354,7 @@ GRANT SELECT ON role_permissions TO natter_api_user;</code></pre>
     <h3 id="s2b">8.2.2 静态角色</h3>
     <p>决定了角色对应什么权限之后，还要决定"哪个用户拥有哪个角色"，最常见的做法是静态配置——加一张表把某个用户在某个社交空间里的角色记下来。因为 Natter 的角色是限定在单个社交空间内的（一个空间的 owner 管不了另一个空间），所以主键是 <code>(space_id, user_id)</code>：</p>
 
-    <pre class="plain"><code>CREATE TABLE user_roles(
+    <pre class="plain"><code class="language-sql">CREATE TABLE user_roles(
     space_id INT NOT NULL REFERENCES spaces(space_id),
     user_id VARCHAR(30) NOT NULL REFERENCES users(user_id),
     role_id VARCHAR(30) NOT NULL REFERENCES role_permissions(role_id),
@@ -375,7 +376,7 @@ CREATE INDEX user_roles_idx ON user_roles(space_id, user_id);</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch08/.../controller/SpaceController.java（节选）</div>
-        <pre><code>private static final Set&lt;String&gt; DEFINED_ROLES =
+        <pre><code class="language-java">private static final Set&lt;String&gt; DEFINED_ROLES =
         Set.of("owner", "moderator", "member", "observer");
 
 public JSONObject addMember(Request request, Response response) {
@@ -402,7 +403,7 @@ public JSONObject addMember(Request request, Response response) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">models.py / views.py（Django，教学示例）</div>
-        <pre><code># models.py
+        <pre><code class="language-python"># models.py
 class SpaceMembership(models.Model):
     ROLE_CHOICES = [
         ("owner", "owner"), ("moderator", "moderator"),
@@ -432,7 +433,7 @@ class AddMemberView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/spaces.ts（Hono + drizzle-orm，教学示例）</div>
-        <pre><code>const DEFINED_ROLES = new Set(["owner", "moderator", "member", "observer"]);
+        <pre><code class="language-typescript">const DEFINED_ROLES = new Set(["owner", "moderator", "member", "observer"]);
 
 app.post("/spaces/:spaceId/members", async (c) => {
   const spaceId = Number(c.req.param("spaceId"));
@@ -464,7 +465,7 @@ app.post("/spaces/:spaceId/members", async (c) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch08/.../controller/UserController.java（节选）</div>
-        <pre><code>public void lookupPermissions(Request request, Response response) {
+        <pre><code class="language-java">public void lookupPermissions(Request request, Response response) {
     requireAuthentication(request, response);
     var spaceId = Long.parseLong(request.params(":spaceId"));
     var username = (String) request.attribute("subject");
@@ -500,7 +501,7 @@ public Filter requirePermission(String method, String permission) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">permissions.py / views.py（DRF，教学示例）</div>
-        <pre><code># permissions.py
+        <pre><code class="language-python"># permissions.py
 ROLE_PERMS = {"owner": "rwd", "moderator": "rd", "member": "rw", "observer": "r"}
 
 class HasSpacePermission(BasePermission):
@@ -528,7 +529,7 @@ class MessageDetailView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/requireRole.ts（Hono，教学示例）</div>
-        <pre><code>const ROLE_PERMS: Record&lt;string, string&gt; = {
+        <pre><code class="language-typescript">const ROLE_PERMS: Record&lt;string, string&gt; = {
   owner: "rwd", moderator: "rd", member: "rw", observer: "r",
 };
 
@@ -638,7 +639,7 @@ app.delete(
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch08/.../controller/ABACAccessController.java</div>
-        <pre><code>public abstract class ABACAccessController {
+        <pre><code class="language-java">public abstract class ABACAccessController {
 
     public void enforcePolicy(Request request, Response response) {
         var subjectAttrs = new HashMap&lt;String, Object&gt;();
@@ -677,7 +678,7 @@ app.delete(
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">policy/abac.py（教学示例）</div>
-        <pre><code>from datetime import datetime
+        <pre><code class="language-python">from datetime import datetime
 
 class Decision:
     def __init__(self):
@@ -716,7 +717,7 @@ class ABACMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/policy/abac.ts（Hono，教学示例）</div>
-        <pre><code>interface Decision {
+        <pre><code class="language-typescript">interface Decision {
   permit: boolean;
   deny(): void;      // 覆盖默认值
   permitExplicit(): void;  // 显式允许被忽略
@@ -766,7 +767,7 @@ export const enforcePolicy: MiddlewareHandler = async (c, next) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch08/.../controller/DroolsAccessController.java + src/main/resources/accessrules.drl</div>
-        <pre><code>// DroolsAccessController.java
+        <pre><code class="language-java">// DroolsAccessController.java
 public class DroolsAccessController extends ABACAccessController {
     private final KieContainer kieContainer;
 
@@ -810,7 +811,7 @@ end</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">policy/rules.py（django-rules，教学示例）</div>
-        <pre><code>import rules
+        <pre><code class="language-python">import rules
 from datetime import time
 
 @rules.predicate
@@ -836,7 +837,7 @@ POLICY_RULES = [rule_office_hours]</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/policy/opa.ts + policy/authz.rego（Hono 调用 Open Policy Agent，教学示例）</div>
-        <pre><code>// src/policy/opa.ts —— Hono 端只负责把属性 POST 给 OPA，规则本身跑在 OPA 里
+        <pre><code class="language-typescript">// src/policy/opa.ts —— Hono 端只负责把属性 POST 给 OPA，规则本身跑在 OPA 里
 export async function checkWithOPA(input: {
   subject: object; resource: object; action: object; environment: object;
 }): Promise&lt;boolean&gt; {
@@ -1041,6 +1042,9 @@ hour_out_of_range(h) { h &gt; 17 }
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

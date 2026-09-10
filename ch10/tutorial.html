@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 10 章：Kubernetes 中的微服务 API · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -145,7 +146,7 @@
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch10/docker/h2/Dockerfile</div>
-        <pre><code>FROM curlimages/curl:7.66.0 AS build-env
+        <pre><code class="language-dockerfile">FROM curlimages/curl:7.66.0 AS build-env
 
 ENV RELEASE h2-2018-03-18.zip
 ENV SHA256 a45e7824b4f54f5d9d65fb89f22e1e75ecadb15ea4dcf8c5d432b80af59ea759
@@ -172,7 +173,7 @@ ENTRYPOINT ["java", "-Djava.security.egd=file:/dev/urandom", \
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">docker/django/Dockerfile（教学示例）</div>
-        <pre><code># 第一阶段：安装依赖
+        <pre><code class="language-dockerfile"># 第一阶段：安装依赖
 FROM python:3.12-slim AS build-env
 WORKDIR /app
 COPY requirements.txt .
@@ -194,7 +195,7 @@ ENTRYPOINT ["gunicorn", "natter.wsgi:application", \
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">docker/hono/Dockerfile（教学示例）</div>
-        <pre><code># 第一阶段：只安装生产依赖
+        <pre><code class="language-dockerfile"># 第一阶段：只安装生产依赖
 FROM node:20-slim AS build-env
 WORKDIR /app
 COPY package*.json .
@@ -245,7 +246,7 @@ ENTRYPOINT ["src/index.js"]</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch10/kubernetes/natter-api-deployment.yaml + natter-api-service.yaml</div>
-        <pre><code>apiVersion: apps/v1
+        <pre><code class="language-yaml">apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: natter-api-deployment
@@ -291,7 +292,7 @@ spec:
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">kubernetes/django-api-deployment.yaml（教学示例，同样的安全上下文 + 健康检查探针）</div>
-        <pre><code>apiVersion: apps/v1
+        <pre><code class="language-yaml">apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: django-api-deployment
@@ -352,7 +353,7 @@ spec:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">kubernetes/hono-api-deployment.yaml（教学示例）</div>
-        <pre><code>apiVersion: apps/v1
+        <pre><code class="language-yaml">apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: hono-api-deployment
@@ -425,7 +426,7 @@ spec:
       只要在 <code class="inline">pom.xml</code> 里配置好基础镜像、暴露端口和运行用户即可。部署前还要把
       JDBC 连接串从本地内存数据库改成指向刚部署好的数据库 Service：
     </p>
-    <pre class="plain"><code>var jdbcUrl = "jdbc:h2:tcp://natter-database-service:9092/mem:natter";</code></pre>
+    <pre class="plain"><code class="language-java">var jdbcUrl = "jdbc:h2:tcp://natter-database-service:9092/mem:natter";</code></pre>
     <p>
       注意这里用的是 <strong>Service 的 DNS 名字</strong>，而不是某个具体 Pod 的 IP——这正是上一节讲的
       "稳定门牌号"的好处：数据库 Pod 换到哪个 Node、重启过多少次，Natter API 都不用关心。
@@ -452,7 +453,7 @@ spec:
       link-preview 服务的最初版本非常直白：拿到 <code class="inline">url</code> 查询参数，直接用 jsoup 库
       去抓取并解析：
     </p>
-    <pre class="plain"><code>get("/preview", (request, response) -> {
+    <pre class="plain"><code class="language-java">get("/preview", (request, response) -> {
     var url = request.queryParams("url");
     var doc = Jsoup.connect(url).timeout(3000).get();   // 直接抓取，未做任何校验！
     var title = doc.title();
@@ -468,7 +469,7 @@ spec:
       主 Natter API 在返回消息时，会用一个正则表达式扫描消息文本里形如 <code class="inline">http(s)://...</code>
       的链接，逐个调用这个新服务：
     </p>
-    <pre class="plain"><code>private final URI linkPreviewService =
+    <pre class="plain"><code class="language-java">private final URI linkPreviewService =
         URI.create("http://natter-link-preview-service:4567");
 
 private JSONObject fetchLinkPreview(String link) {
@@ -567,7 +568,7 @@ private JSONObject fetchLinkPreview(String link) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch10/src/main/java/.../LinkPreviewer.java</div>
-        <pre><code>private static Document fetch(String url) throws IOException {
+        <pre><code class="language-java">private static Document fetch(String url) throws IOException {
     Document doc = null;
     var retries = 0;
     while (doc == null && retries++ < 10) {
@@ -611,7 +612,7 @@ private static boolean isUniqueLocalAddress(InetAddress ipAddr) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">link_preview/utils.py（教学示例）</div>
-        <pre><code>import ipaddress
+        <pre><code class="language-python">import ipaddress
 import socket
 from urllib.parse import urlparse
 
@@ -643,7 +644,7 @@ def fetch(url: str, max_redirects: int = 10) -> requests.Response:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/services/linkPreview.ts（教学示例）</div>
-        <pre><code>import ipaddr from "ipaddr.js";
+        <pre><code class="language-typescript">import ipaddr from "ipaddr.js";
 import dns from "node:dns/promises";
 
 const BLOCKED_RANGES = [
@@ -651,7 +652,7 @@ const BLOCKED_RANGES = [
   "multicast", "unspecified", "uniqueLocal", "reserved",
 ];
 
-async function isBlockedAddress(hostname: string): Promise<boolean> {
+async function isBlockedAddress(hostname: string): Promise&lt;boolean&gt; {
   const records = await dns.lookup(hostname, { all: true });
   return records.some(({ address }) =>
     BLOCKED_RANGES.includes(ipaddr.parse(address).range())
@@ -759,7 +760,7 @@ export async function fetchPreview(url: string, maxRedirects = 10) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch10/src/main/java/.../LinkPreviewer.java</div>
-        <pre><code>var expectedHostNames = Set.of(
+        <pre><code class="language-java">var expectedHostNames = Set.of(
         "natter-link-preview-service:4567",
         "natter-link-preview-service.natter-api:4567");
 before((request, response) -> {
@@ -770,7 +771,7 @@ before((request, response) -> {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/settings/production.py</div>
-        <pre><code>ALLOWED_HOSTS = [
+        <pre><code class="language-python">ALLOWED_HOSTS = [
     "natter-link-preview-service",
     "natter-link-preview-service.natter-api",
     "natter-link-preview-service.natter-api.svc.cluster.local",
@@ -783,7 +784,7 @@ before((request, response) -> {
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/hostCheck.ts</div>
-        <pre><code>import type { MiddlewareHandler } from "hono";
+        <pre><code class="language-typescript">import type { MiddlewareHandler } from "hono";
 
 const EXPECTED_HOSTS = new Set([
   "natter-link-preview-service:4567",
@@ -815,7 +816,7 @@ export const checkHost: MiddlewareHandler = async (c, next) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch10/src/main/java/.../LinkPreviewer.java（说明，非新增代码）</div>
-        <pre><code>// 本章 Java 代码（上面的 fetch() / isBlockedAddress()）并没有把
+        <pre><code class="language-java">// 本章 Java 代码（上面的 fetch() / isBlockedAddress()）并没有把
 // "校验 IP" 和 "真正发起连接" 绑定到同一个 socket 上：它是在循环的
 // 每一次迭代里，先调用 isBlockedAddress() 触发一次 DNS 解析做校验，
 // 再调用 Jsoup.connect(url)，这一步 jsoup 内部会自己再解析一次域名。
@@ -831,7 +832,7 @@ export const checkHost: MiddlewareHandler = async (c, next) => {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">link_preview/pinned.py（教学示例）</div>
-        <pre><code>import ipaddress
+        <pre><code class="language-python">import ipaddress
 import socket
 from urllib.parse import urlparse
 
@@ -875,11 +876,11 @@ def fetch_pinned(url: str) -> requests.Response:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/services/linkPreviewPinned.ts（教学示例）</div>
-        <pre><code>import dns from "node:dns/promises";
+        <pre><code class="language-typescript">import dns from "node:dns/promises";
 import { Agent, fetch } from "undici";
 import ipaddr from "ipaddr.js";
 
-async function resolveAndValidate(hostname: string): Promise<string> {
+async function resolveAndValidate(hostname: string): Promise&lt;string&gt; {
   const records = await dns.lookup(hostname, { all: true });
   for (const { address } of records) {
     const range = ipaddr.parse(address).range();
@@ -1005,7 +1006,7 @@ export async function fetchPinned(url: string) {
       下面是书中给出的一份网络策略示例，锁定谁能连接 H2 数据库 Pod（这是 Kubernetes 原生资源，YAML
       语法本身与用什么语言写业务代码无关，所以这里不需要再拆成三栏）：
     </p>
-    <pre class="plain"><code>apiVersion: networking.k8s.io/v1
+    <pre class="plain"><code class="language-yaml">apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: database-network-policy
@@ -1051,7 +1052,7 @@ spec:
       </p>
     </div>
     <p>本章真实的 Ingress 配置如下（来自 <code class="inline">ch10/kubernetes/natter-ingress.yaml</code>）：</p>
-    <pre class="plain"><code>apiVersion: extensions/v1beta1
+    <pre class="plain"><code class="language-yaml">apiVersion: extensions/v1beta1
 kind: Ingress
 metadata:
   name: api-ingress
@@ -1076,7 +1077,7 @@ spec:
     <p>
       要让 Ingress 能对外提供 HTTPS，还需要提前把证书和私钥打包成一个 Kubernetes Secret：
     </p>
-    <pre class="plain"><code>kubectl create secret tls natter-tls -n natter-api \
+    <pre class="plain"><code class="language-bash">kubectl create secret tls natter-tls -n natter-api \
   --key=api.natter.local-key.pem --cert=api.natter.local.pem</code></pre>
     <p>
       配置生效之后，外部客户端就可以直接用 HTTPS 访问 <code class="inline">api.natter.local</code>，
@@ -1199,6 +1200,9 @@ spec:
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

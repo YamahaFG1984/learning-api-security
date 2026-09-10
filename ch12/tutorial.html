@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 12 章：保护物联网通信 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -163,7 +164,7 @@
     <code class="inline">receive()</code>。下面是服务端和客户端最核心的部分：</p>
 
     <p><code class="inline">ch12/src/main/java/com/manning/apisecurityinaction/DtlsServer.java</code></p>
-    <pre class="plain"><code>public class DtlsServer {
+    <pre class="plain"><code class="language-java">public class DtlsServer {
     public static void main(String... args) throws Exception {
         try (var channel = new DtlsDatagramChannel(getServerContext())) {
             channel.bind(54321);
@@ -318,7 +319,7 @@
 
     <p><code class="inline">ch12/.../PskServer.java</code> 用的是 Bouncy Castle 的底层 DTLS API
     （不是标准 <code class="inline">SSLEngine</code>，因为 Java 内置的 SSLEngine 目前不支持 AES-CCM）：</p>
-    <pre class="plain"><code>var psk = loadPsk(args[0].toCharArray());
+    <pre class="plain"><code class="language-java">var psk = loadPsk(args[0].toCharArray());
 var crypto = new BcTlsCrypto(new SecureRandom());
 var server = new PSKTlsServer(crypto, getIdentityManager(psk)) {
     @Override
@@ -460,7 +461,7 @@ static byte[] loadPsk(char[] password) throws Exception {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch12/.../CoseEncryptionExample.java（节选）</div>
-        <pre><code>Security.addProvider(new BouncyCastleProvider());
+        <pre><code class="language-java">Security.addProvider(new BouncyCastleProvider());
 var keyMaterial = PskServer.loadPsk("changeit".toCharArray());
 
 var recipient = new Recipient();
@@ -488,7 +489,7 @@ System.out.println(Base64url.encode(message.EncodeToBytes()));</code></pre>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">iot/cose_demo.py（教学示例，简化版，不是完整 COSE/RFC 8152 实现；
         完整实现可参考 pycose 库）</div>
-        <pre><code>import os
+        <pre><code class="language-python">import os
 import cbor2
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 
@@ -509,7 +510,7 @@ reading = cbor2.loads(plaintext)</code></pre>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/iot/cose.ts（教学示例，简化版，不是完整 COSE 实现；
         更贴近规范可参考 cose-js）</div>
-        <pre><code>import crypto from "node:crypto";
+        <pre><code class="language-typescript">import crypto from "node:crypto";
 import cbor from "cbor";
 
 const keyMaterial = loadPsk("changeit");        // 32 字节主密钥
@@ -546,7 +547,7 @@ const envelope = cbor.encode({ nonce, ciphertext, authTag });</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch12/.../NaclCborExample.java</div>
-        <pre><code>var senderKeys = CryptoBox.keyPair();
+        <pre><code class="language-java">var senderKeys = CryptoBox.keyPair();
 var recipientKeys = CryptoBox.keyPair();
 var cborMap = CBORObject.NewMap()
         .Add("foo", "bar")
@@ -562,7 +563,7 @@ System.out.println(CBORObject.DecodeFromBytes(cbor));</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">iot/nacl_box.py（教学示例，使用 PyNaCl / libsodium 绑定）</div>
-        <pre><code>from nacl.public import PrivateKey, Box
+        <pre><code class="language-python">from nacl.public import PrivateKey, Box
 import cbor2
 
 sender_keys = PrivateKey.generate()
@@ -579,7 +580,7 @@ print(cbor2.loads(plaintext))</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/iot/naclBox.ts（教学示例，使用 tweetnacl）</div>
-        <pre><code>import nacl from "tweetnacl";
+        <pre><code class="language-typescript">import nacl from "tweetnacl";
 import cbor from "cbor";
 
 const senderKeys = nacl.box.keyPair();
@@ -647,7 +648,7 @@ console.log(cbor.decode(Buffer.from(opened)));</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch12/.../AesSivExample.java</div>
-        <pre><code>var psk = PskServer.loadPsk("changeit".toCharArray());
+        <pre><code class="language-java">var psk = PskServer.loadPsk("changeit".toCharArray());
 var macKey = new SecretKeySpec(Arrays.copyOfRange(psk, 0, 16), "AES");
 var encKey = new SecretKeySpec(Arrays.copyOfRange(psk, 16, 32), "AES");
 
@@ -665,7 +666,7 @@ assert Arrays.equals(plaintext, body);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">iot/siv_demo.py（教学示例，使用 cryptography 库内置的 AESSIV，实现 RFC 5297）</div>
-        <pre><code>import os
+        <pre><code class="language-python">import os
 import cbor2
 from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 
@@ -683,7 +684,7 @@ assert plaintext == body</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/iot/siv.ts（教学示例，使用 miscreant，一个多语言实现 RFC 5297 AES-SIV 的库）</div>
-        <pre><code>import { SIV } from "miscreant";
+        <pre><code class="language-typescript">import { SIV } from "miscreant";
 import crypto from "node:crypto";
 import cbor from "cbor";
 
@@ -840,7 +841,7 @@ const plaintext = await siv.open(ciphertext, [header, randomIv]);</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch12/.../RatchetExample.java</div>
-        <pre><code>private static byte[] ratchet(byte[] oldKey) throws Exception {
+        <pre><code class="language-java">private static byte[] ratchet(byte[] oldKey) throws Exception {
     var cipher = Cipher.getInstance("AES/CTR/NoPadding");
     var iv = new byte[16];
     Arrays.fill(iv, (byte) 0xFF);          // 保留全 1 的 IV 专门用于棘轮，绝不用来加密消息
@@ -858,7 +859,7 @@ for (int i = 0; i &lt; 10; ++i) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">iot/ratchet.py（教学示例）</div>
-        <pre><code>from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        <pre><code class="language-python">from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 def ratchet(old_key: bytes) -&gt; bytes:
     iv = b"\xff" * 16                       # 保留全 1 的 IV 专门用于棘轮
@@ -872,7 +873,7 @@ for _ in range(10):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/iot/ratchet.ts（教学示例）</div>
-        <pre><code>import crypto from "node:crypto";
+        <pre><code class="language-typescript">import crypto from "node:crypto";
 
 function ratchet(oldKey: Buffer): Buffer {
   const iv = Buffer.alloc(16, 0xff);        // 保留全 1 的 IV 专门用于棘轮
@@ -945,6 +946,9 @@ for (let i = 0; i &lt; 10; i++) {
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

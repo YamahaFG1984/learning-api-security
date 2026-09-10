@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 13 章：保护物联网 API · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 <style>
   .loopbox-label { font-size: 11px; fill: #5b6478; }
@@ -67,7 +68,7 @@
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/Device.java（节选）</div>
-        <pre><code>public class Device {
+        <pre><code class="language-java">public class Device {
     final String deviceId;
     final String manufacturer;
     final String model;
@@ -100,7 +101,7 @@
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">devices/models.py（教学示例）</div>
-        <pre><code>from django.db import models
+        <pre><code class="language-python">from django.db import models
 from nacl.secret import SecretBox
 
 class Device(models.Model):
@@ -121,7 +122,7 @@ device = Device.objects.filter(pk=device_id).first()</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/db/schema.ts + src/services/device.ts（教学示例）</div>
-        <pre><code>// src/db/schema.ts
+        <pre><code class="language-typescript">// src/db/schema.ts
 import { pgTable, varchar, customType } from "drizzle-orm/pg-core";
 
 const bytea = customType&lt;{ data: Buffer }&gt;({ dataType: () =&gt; "bytea" });
@@ -156,7 +157,7 @@ const device = await db.query.devices.findFirst({
     <p>
       另一种做法是不把设备档案存数据库，而是给每台设备发一张"证书"——可以是传统的公钥证书，也可以是像下面这样一个自包含的、由可信签发方签过名的 JSON Web Token（JWT），里面直接携带设备信息和一份加密过的 PSK。设备把这个令牌当作一个不透明的凭据，原样交给它要访问的 API；API 因为信任签发者的签名而信任这个令牌，再把里面的 PSK 解密出来用于和设备通信。
     </p>
-    <pre class="plain"><code>{
+    <pre class="plain"><code class="language-json">{
   "iss": "https://example.com/devices",
   "iat": 1590139506,
   "exp": 1905672306,
@@ -235,7 +236,7 @@ const device = await db.query.devices.findFirst({
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/DeviceIdentityManager.java</div>
-        <pre><code>public class DeviceIdentityManager implements TlsPSKIdentityManager {
+        <pre><code class="language-java">public class DeviceIdentityManager implements TlsPSKIdentityManager {
     private final Database database;
     private final Key pskDecryptionKey;
 
@@ -260,7 +261,7 @@ const device = await db.query.devices.findFirst({
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">devices/middleware.py（教学示例）</div>
-        <pre><code># PSK/DTLS 或 mTLS 握手真正发生在反向代理（nginx / Envoy）里，
+        <pre><code class="language-python"># PSK/DTLS 或 mTLS 握手真正发生在反向代理（nginx / Envoy）里，
 # Django 本身不终止 TLS。代理验证完设备身份后，
 # 会把设备标识写进一个内部请求头再转发给应用。
 class DeviceIdentityMiddleware:
@@ -279,7 +280,7 @@ class DeviceIdentityMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/deviceIdentity.ts（教学示例）</div>
-        <pre><code>import { createMiddleware } from "hono/factory";
+        <pre><code class="language-typescript">import { createMiddleware } from "hono/factory";
 import { eq } from "drizzle-orm";
 
 // 同样假设 DTLS/mTLS 已经在网关层（Envoy/nginx）终止，
@@ -311,7 +312,7 @@ export const deviceIdentity = createMiddleware(async (c, next) =&gt; {
     <p>
       要防住这种攻击，API 需要确认请求不仅"来自谁"，还得是"刚刚发生的"，这两者合起来才叫<strong>实体认证（entity authentication）</strong>：
     </p>
-    <pre class="plain"><code>实体认证 = 消息认证（这条消息确实是它自称的发送者写的）
+    <pre class="plain"><code class="language-plaintext">实体认证 = 消息认证（这条消息确实是它自称的发送者写的）
          + 新鲜性 / freshness（这条消息是最近发出的，不是被重放的旧消息）</code></pre>
     <p>保证"新鲜性"通常有三种办法，安全性依次递增，但代价也依次变高：</p>
     <ul>
@@ -333,7 +334,7 @@ export const deviceIdentity = createMiddleware(async (c, next) =&gt; {
         OSCORE 的密钥派生、nonce 生成、CoAP 报文编码都发生在比 HTTP 应用框架更底层的位置——通常是设备固件或专门的 CoAP 网关里的逻辑，而不是 Django、Hono 这类跑在 HTTP 之上的 Web 框架。所以这里不给三栏 Django/Hono 对比，直接看一段从 Java 摘录、精简过的核心逻辑就够了；如果你要在 Python/Node 里做类似的事，可以了解一下 <code class="inline">aiocoap</code>（Python 的 CoAP 实现）、<code class="inline">cryptography</code> 库自带的 HKDF，以及 Node 生态里的 <code class="inline">node-coap</code>、<code class="inline">cose-js</code>——但它们服务的场景是嵌入式设备，不是普通的 Web 后端。
       </p>
     </div>
-    <pre class="plain"><code>// ch13/src/main/java/com/manning/apisecurityinaction/Oscore.java（节选、精简）
+    <pre class="plain"><code class="language-java">// ch13/src/main/java/com/manning/apisecurityinaction/Oscore.java（节选、精简）
 
 // 用 HKDF-Expand 从主 HKDF 密钥派生出 Sender/Recipient Key
 private static Key deriveKey(Key hkdfKey, byte[] id, byte[] idContext,
@@ -450,7 +451,7 @@ private static byte[] nonce(int ivLength, long sequenceNumber,
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/ReplayProtectionExample.java（节选）</div>
-        <pre><code>var etag = new AtomicInteger(42);
+        <pre><code class="language-java">var etag = new AtomicInteger(42);
 put("/test", (request, response) -&gt; {
     var expectedEtag = parseInt(request.headers("If-Matches"));
 
@@ -470,7 +471,7 @@ put("/test", (request, response) -&gt; {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/views.py（教学示例）</div>
-        <pre><code>from django.db import transaction
+        <pre><code class="language-python">from django.db import transaction
 from django.http import HttpResponse
 
 @transaction.atomic
@@ -492,7 +493,7 @@ def update_resource(request, resource_id):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/resource.ts（教学示例）</div>
-        <pre><code>import { Redis } from "ioredis";
+        <pre><code class="language-typescript">import { Redis } from "ioredis";
 const redis = new Redis();
 
 // 用 Lua 脚本保证"比较并设置"是原子操作，等价于 AtomicInteger.compareAndSet
@@ -532,7 +533,7 @@ app.put("/resource/:id", async (c) =&gt; {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/ReplayProtectionExample.java（节选）</div>
-        <pre><code>before((request, response) -&gt; {
+        <pre><code class="language-java">before((request, response) -&gt; {
     var encryptedRequest = CryptoBox.fromString(request.body());
     var decrypted = encryptedRequest.decrypt(
             serverKeys.getPrivate(), clientKeys.getPublic());
@@ -556,7 +557,7 @@ app.put("/resource/:id", async (c) =&gt; {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">devices/middleware.py（教学示例）</div>
-        <pre><code>import cbor2
+        <pre><code class="language-python">import cbor2
 from nacl.public import Box
 from django.http import HttpResponseForbidden
 
@@ -582,7 +583,7 @@ class RequestObjectMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/requestObject.ts（教学示例）</div>
-        <pre><code>import { box } from "tweetnacl";
+        <pre><code class="language-typescript">import { box } from "tweetnacl";
 import { decode } from "cbor-x";
 import { createMiddleware } from "hono/factory";
 
@@ -709,7 +710,7 @@ export const requestObject = createMiddleware(async (c, next) =&gt; {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/DeviceGrantClient.java（节选）</div>
-        <pre><code>private static JSONObject beginDeviceAuthorization(
+        <pre><code class="language-java">private static JSONObject beginDeviceAuthorization(
         String clientId, String scope) throws Exception {
     var form = "client_id=" + URLEncoder.encode(clientId, UTF_8) +
             "&scope=" + URLEncoder.encode(scope, UTF_8);
@@ -747,7 +748,7 @@ public static void main(String... args) throws Exception {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">device_client.py（教学示例，运行在设备/设备模拟器上）</div>
-        <pre><code>import time
+        <pre><code class="language-python">import time
 import requests
 
 AS_BASE = "https://as.example.com"
@@ -790,7 +791,7 @@ if __name__ == "__main__":
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">device-client.ts（教学示例，运行在设备端）</div>
-        <pre><code>const AS_BASE = "https://as.example.com";
+        <pre><code class="language-typescript">const AS_BASE = "https://as.example.com";
 
 async function beginDeviceAuthorization(clientId: string, scope: string) {
   const res = await fetch(`${AS_BASE}/device_authorization`, {
@@ -953,7 +954,7 @@ main();</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch13/src/main/java/com/manning/apisecurityinaction/token/SignedJwtAccessTokenStore.java（节选，离线场景下需把 jwkSource 换成本地缓存的 JWKSource）</div>
-        <pre><code>public Optional&lt;Token&gt; read(Request request, String tokenId) {
+        <pre><code class="language-java">public Optional&lt;Token&gt; read(Request request, String tokenId) {
     try {
         var verifier = new DefaultJWTProcessor&lt;&gt;();
         var keySelector = new JWSVerificationKeySelector&lt;&gt;(
@@ -981,7 +982,7 @@ main();</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">offline_auth.py（教学示例，跑在设备本地，不联网、不查库）</div>
-        <pre><code>import jwt
+        <pre><code class="language-python">import jwt
 from jwt import InvalidTokenError
 
 # 联网时提前下载并缓存到本地文件 / 安全存储里的 AS 公钥
@@ -1002,7 +1003,7 @@ def verify_offline(token: str, expected_issuer: str,
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">offline-auth.ts（教学示例，跑在设备本地）</div>
-        <pre><code>import { jwtVerify, importJWK } from "jose";
+        <pre><code class="language-typescript">import { jwtVerify, importJWK } from "jose";
 
 // 联网时预先下载并缓存的 AS 公钥（JWK）
 const cachedKey = await importJWK(cachedJwk, "ES256");
@@ -1065,6 +1066,9 @@ export async function verifyOffline(
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

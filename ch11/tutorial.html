@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 11 章：保护服务间调用的 API · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 <style>
   .badge-box { font-size: 11px; fill: #1c2333; }
@@ -118,7 +119,7 @@
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/RevokeAccessToken.java（节选，展示 client_secret_basic 的标准写法）</div>
-        <pre><code>var clientId = args[0];
+        <pre><code class="language-java">var clientId = args[0];
 var clientSecret = args[1];
 
 var credentials = URLEncoder.encode(clientId, UTF_8) +
@@ -144,7 +145,7 @@ var response = httpClient.send(httpRequest,
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">services/link_preview/client.py（教学示例，requests-oauthlib）</div>
-        <pre><code>from oauthlib.oauth2 import BackendApplicationClient
+        <pre><code class="language-python">from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
 
 client_id = "test"
@@ -166,7 +167,7 @@ resp = oauth.get("https://api.natter.local/spaces")</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/services/asClient.ts（教学示例，原生 fetch）</div>
-        <pre><code>const AS_TOKEN_ENDPOINT =
+        <pre><code class="language-typescript">const AS_TOKEN_ENDPOINT =
   "https://as.example.com:8443/oauth2/access_token";
 
 async function getServiceAccessToken(): Promise&lt;string&gt; {
@@ -244,7 +245,7 @@ async function getServiceAccessToken(): Promise&lt;string&gt; {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/JwtBearerClient.java（节选）</div>
-        <pre><code>var password = "changeit".toCharArray();
+        <pre><code class="language-java">var password = "changeit".toCharArray();
 var keyStore = KeyStore.getInstance("PKCS12");
 keyStore.load(new FileInputStream("keystore.p12"), password);
 var privateKey = (ECPrivateKey)
@@ -282,7 +283,7 @@ var response = httpClient.send(request,
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">services/link_preview/jwt_bearer.py（教学示例，pyjwt）</div>
-        <pre><code>import time, uuid, jwt, requests
+        <pre><code class="language-python">import time, uuid, jwt, requests
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 with open("es256-key.pem", "rb") as f:
@@ -317,7 +318,7 @@ access_token = resp.json()["access_token"]
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/services/jwtBearer.ts（教学示例，jose）</div>
-        <pre><code>import { SignJWT, importPKCS8, exportJWK } from "jose";
+        <pre><code class="language-typescript">import { SignJWT, importPKCS8, exportJWK } from "jose";
 import { randomUUID } from "node:crypto";
 
 const clientId = "test";
@@ -416,7 +417,7 @@ const { access_token } = await res.json();
     <h3 id="s4-2">校验客户端身份：证书信息是怎么"透传"给应用的</h3>
     <p>在真实部署里，TLS 握手几乎从来不是应用代码自己处理的——Spark、Django、Hono 这些 Web 框架通常运行在 HTTP 层，TLS 终止（谁来验证证书、谁来做握手）交给前面的反向代理或 Ingress 控制器（比如 NGINX、Envoy）。这一节我们给 Kubernetes 里的 NGINX Ingress 控制器加几个注解，让它要求并校验客户端证书，然后把校验结果和证书内容通过几个约定好的请求头转发给后面的应用。</p>
 
-    <pre class="plain"><code># ch11/kubernetes/natter-ingress.yaml（节选）
+    <pre class="plain"><code class="language-yaml"># ch11/kubernetes/natter-ingress.yaml（节选）
 metadata:
   annotations:
     nginx.ingress.kubernetes.io/auth-tls-verify-client: "optional"
@@ -484,7 +485,7 @@ metadata:
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/controller/UserController.java（节选）</div>
-        <pre><code>private static final int DNS_TYPE = 2;
+        <pre><code class="language-java">private static final int DNS_TYPE = 2;
 
 public void authenticate(Request request, Response response) {
     if ("SUCCESS".equals(request.headers("ssl-client-verify"))) {
@@ -524,7 +525,7 @@ public static X509Certificate decodeCert(String encodedCert) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/middleware.py（教学示例，cryptography）</div>
-        <pre><code>from cryptography import x509
+        <pre><code class="language-python">from cryptography import x509
 from urllib.parse import unquote
 
 class ClientCertAuthMiddleware:
@@ -550,7 +551,7 @@ class ClientCertAuthMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/clientCertAuth.ts（教学示例，@peculiar/x509）</div>
-        <pre><code>import { X509Certificate } from "@peculiar/x509";
+        <pre><code class="language-typescript">import { X509Certificate } from "@peculiar/x509";
 import type { MiddlewareHandler } from "hono";
 
 export const clientCertAuth: MiddlewareHandler = async (c, next) => {
@@ -587,7 +588,7 @@ export const clientCertAuth: MiddlewareHandler = async (c, next) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/token/OAuth2TokenStore.java（节选）</div>
-        <pre><code>private Optional&lt;Token&gt; processResponse(JSONObject response,
+        <pre><code class="language-java">private Optional&lt;Token&gt; processResponse(JSONObject response,
         Request originalRequest) {
     var expiry = Instant.ofEpochSecond(response.getLong("exp"));
     var subject = response.getString("sub");
@@ -625,7 +626,7 @@ private byte[] thumbprint(X509Certificate certificate) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/tokens.py（教学示例，cryptography + hashlib）</div>
-        <pre><code>import hashlib, base64
+        <pre><code class="language-python">import hashlib, base64
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 from urllib.parse import unquote
@@ -650,7 +651,7 @@ def validate_cnf_binding(introspection: dict, request) -> bool:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/services/certBinding.ts（教学示例，Web Crypto）</div>
-        <pre><code>import { X509Certificate } from "@peculiar/x509";
+        <pre><code class="language-typescript">import { X509Certificate } from "@peculiar/x509";
 
 function base64urlToBytes(b64url: string): Uint8Array {
   const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
@@ -691,7 +692,7 @@ export async function validateCnfBinding(
     <h3 id="s5-1">Kubernetes Secret</h3>
     <p>Kubernetes 自带一种叫 <strong>Secret</strong> 的资源，专门存放这类敏感配置。它和 Pod、Service 一样有名字、有命名空间，值以 Base64 编码存储（注意：Base64 只是编码，不是加密，千万不要把 Secret 的 YAML 直接提交到代码仓库）。可以把 Secret 以文件的形式挂载进容器（推荐），也可以作为环境变量注入（不推荐——容易通过 <code class="inline">kubectl describe pod</code> 泄露，也不支持二进制内容）。</p>
 
-    <pre class="plain"><code># 精简版 Kubernetes Secret 示例
+    <pre class="plain"><code class="language-yaml"># 精简版 Kubernetes Secret 示例
 apiVersion: v1
 kind: Secret
 metadata:
@@ -720,7 +721,7 @@ volumes:
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/Main.java（节选）</div>
-        <pre><code>var secretsPath = Paths.get("/etc/secrets/database");
+        <pre><code class="language-java">var secretsPath = Paths.get("/etc/secrets/database");
 var dbUsername = Files.readString(secretsPath.resolve("username"));
 var dbPassword = Files.readString(secretsPath.resolve("password"));
 
@@ -731,7 +732,7 @@ var datasource = JdbcConnectionPool.create(
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/settings.py（教学示例）</div>
-        <pre><code>import os
+        <pre><code class="language-python">import os
 from pathlib import Path
 
 SECRETS_DIR = Path("/etc/secrets/database")
@@ -753,7 +754,7 @@ DATABASES = {
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/config/secrets.ts（教学示例）</div>
-        <pre><code>import { readFileSync, existsSync } from "node:fs";
+        <pre><code class="language-typescript">import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const SECRETS_DIR = "/etc/secrets/database";
@@ -871,7 +872,7 @@ export const dbConfig = {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/src/main/java/com/manning/apisecurityinaction/HKDF.java（全文）+ Main.java（用法节选）</div>
-        <pre><code>public class HKDF {
+        <pre><code class="language-java">public class HKDF {
     public static Key expand(Key masterKey, String context,
                              int outputKeySize, String algorithm)
             throws GeneralSecurityException {
@@ -899,7 +900,7 @@ var seed = HKDF.expand(macKey, "nacl-signing-key-seed", 32, "NaCl");</code></pre
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/crypto.py（教学示例，cryptography.hazmat）</div>
-        <pre><code>from cryptography.hazmat.primitives import hashes
+        <pre><code class="language-python">from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
 def derive_key(master_key: bytes, context: str,
@@ -916,7 +917,7 @@ signing_seed = derive_key(master_key, "nacl-signing-key-seed", 32)</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/crypto/hkdf.ts（教学示例，Node crypto）</div>
-        <pre><code>import { hkdfSync } from "node:crypto";
+        <pre><code class="language-typescript">import { hkdfSync } from "node:crypto";
 
 function deriveKey(
   masterKey: Buffer, context: string, outputSize = 32,
@@ -1011,7 +1012,7 @@ const signingSeed = deriveKey(masterKey, "nacl-signing-key-seed", 32);</code></p
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch11/.../controller/TokenController.java + token/OAuth2TokenStore.java（节选，网关/边缘服务的内省角色）</div>
-        <pre><code>// TokenController.java
+        <pre><code class="language-java">// TokenController.java
 public void validateToken(Request request, Response response) {
     var tokenId = request.headers("Authorization");
     if (tokenId == null || !tokenId.startsWith("Bearer ")) return;
@@ -1042,7 +1043,7 @@ var httpResponse = httpClient.send(httpRequest,
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/middleware.py（教学示例，下游微服务信任网关签发的内部 JWT）</div>
-        <pre><code>import jwt
+        <pre><code class="language-python">import jwt
 from django.http import JsonResponse
 
 GATEWAY_PUBLIC_KEY = settings.GATEWAY_JWT_PUBLIC_KEY  # 网关公钥
@@ -1070,7 +1071,7 @@ class GatewayJwtAuthMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/gatewayJwt.ts（教学示例，下游微服务）</div>
-        <pre><code>import { jwt } from "hono/jwt";
+        <pre><code class="language-typescript">import { jwt } from "hono/jwt";
 import { verify } from "hono/jwt";
 import type { MiddlewareHandler } from "hono";
 
@@ -1098,7 +1099,7 @@ export const gatewayAuth: MiddlewareHandler = async (c, next) => {
     <h3 id="s6-2">OAuth2 Token Exchange</h3>
     <p>幻影令牌模式很高效，但它假设网关和微服务在同一个信任边界内。如果服务调用要跨越更强的信任边界（比如医疗系统里多家医院之间转诊，逐级授权访问同一份病历），标准化程度更高的方案是 <strong>OAuth2 Token Exchange</strong>（RFC 8693）：客户端向 AS 的令牌端点发起请求，<code class="inline">grant_type</code> 是 <code class="inline">urn:ietf:params:oauth:grant-type:token-exchange</code>，把用户原始令牌作为 <code class="inline">subject_token</code> 参数带上，AS 校验后返回一枚新令牌，通常还会在里面加一个 <code class="inline">act</code>（actor）claim，写明"这次操作是谁代表谁做的"。</p>
 
-    <pre class="plain"><code>{
+    <pre class="plain"><code class="language-json">{
   "sub": "alice@example.com",
   "act": {
     "sub": "https://service16.example.com",
@@ -1144,6 +1145,9 @@ export const gatewayAuth: MiddlewareHandler = async (c, next) => {
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

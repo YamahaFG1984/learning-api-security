@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 3 章：为 Natter API 加固安全 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -178,7 +179,7 @@
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/Main.java（节选）</div>
-        <pre><code>import com.google.common.util.concurrent.RateLimiter;
+        <pre><code class="language-java">import com.google.common.util.concurrent.RateLimiter;
 
 var rateLimiter = RateLimiter.create(2.0d);
 
@@ -190,7 +191,7 @@ before((request, response) -> {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/middleware.py（教学示例，基于 django-ratelimit）</div>
-        <pre><code>from django_ratelimit.core import is_ratelimited
+        <pre><code class="language-python">from django_ratelimit.core import is_ratelimited
 from django.http import JsonResponse
 
 class RateLimitMiddleware:
@@ -220,7 +221,7 @@ MIDDLEWARE = [
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/index.ts（使用 hono-rate-limiter）</div>
-        <pre><code>import { Hono } from "hono";
+        <pre><code class="language-typescript">import { Hono } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
 
 const app = new Hono();
@@ -249,7 +250,7 @@ app.use("*", rateLimiter({
 
     <h3>3.3.1 HTTP Basic 认证</h3>
     <p>API 没有网页表单，所以最简单的做法是用 HTTP 标准的 Basic 认证方案（RFC 7617）：客户端把 <code class="inline">用户名:密码</code> 拼成一个字符串，用 Base64 编码后放进 <code class="inline">Authorization</code> 请求头：</p>
-    <pre class="plain"><code>Authorization: Basic ZGVtbzpjaGFuZ2VpdA==</code></pre>
+    <pre class="plain"><code class="language-http">Authorization: Basic ZGVtbzpjaGFuZ2VpdA==</code></pre>
     <p>解码后就是 <code class="inline">demo:changeit</code>。</p>
 
     <div class="callout danger">
@@ -266,7 +267,7 @@ app.use("*", rateLimiter({
     </div>
 
     <p>用户表的结构很简单，只存用户名和密码哈希：</p>
-    <pre class="plain"><code>CREATE TABLE users(
+    <pre class="plain"><code class="language-sql">CREATE TABLE users(
     user_id VARCHAR(30) PRIMARY KEY,
     pw_hash VARCHAR(255) NOT NULL
 );
@@ -283,7 +284,7 @@ GRANT SELECT, INSERT ON users TO natter_api_user;</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/controller/UserController.java</div>
-        <pre><code>public class UserController {
+        <pre><code class="language-java">public class UserController {
     private static final String USERNAME_PATTERN =
             "[a-zA-Z][a-zA-Z0-9]{1,29}";
 
@@ -314,7 +315,7 @@ GRANT SELECT, INSERT ON users TO natter_api_user;</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">users/views.py（Django，密码哈希用内置 ScryptPasswordHasher）</div>
-        <pre><code>import re, json
+        <pre><code class="language-python">import re, json
 from django.http import JsonResponse
 from django.contrib.auth.hashers import make_password
 from .models import NatterUser
@@ -348,7 +349,7 @@ class NatterUser(models.Model):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/users.ts（Hono，密码哈希用 @node-rs/argon2）</div>
-        <pre><code>import { Hono } from "hono";
+        <pre><code class="language-typescript">import { Hono } from "hono";
 import { hash } from "@node-rs/argon2";
 import { db } from "../db";
 
@@ -427,7 +428,7 @@ users.post("/users", async (c) => {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/controller/UserController.java</div>
-        <pre><code>public void authenticate(Request request, Response response) {
+        <pre><code class="language-java">public void authenticate(Request request, Response response) {
     var authHeader = request.headers("Authorization");
     if (authHeader == null || !authHeader.startsWith("Basic ")) {
         return;
@@ -462,7 +463,7 @@ before(userController::authenticate);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">users/auth.py（自定义 DRF BasicAuthentication，验证失败不抛异常，只返回 None）</div>
-        <pre><code>from rest_framework.authentication import BasicAuthentication
+        <pre><code class="language-python">from rest_framework.authentication import BasicAuthentication
 from django.contrib.auth.hashers import check_password
 from .models import NatterUser
 
@@ -487,7 +488,7 @@ REST_FRAMEWORK = {
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/auth.ts（Hono 自定义中间件，用 @node-rs/argon2 校验）</div>
-        <pre><code>import type { Context, Next } from "hono";
+        <pre><code class="language-typescript">import type { Context, Next } from "hono";
 import { verify } from "@node-rs/argon2";
 import { db } from "../db";
 
@@ -517,7 +518,7 @@ app.use("*", authenticate);</code></pre>
     </div>
 
     <p>有了认证之后，Create Space 和 Post Message 接口就可以要求"请求体里声明的身份必须和认证结果一致"：</p>
-    <pre class="plain"><code>// SpaceController.createSpace（节选）
+    <pre class="plain"><code class="language-java">// SpaceController.createSpace（节选）
 var owner = json.getString("owner");
 var subject = request.attribute("subject");
 if (!owner.equals(subject)) {
@@ -530,7 +531,7 @@ if (!owner.equals(subject)) {
 
     <h3>3.4.1 启用 HTTPS</h3>
     <p>HTTPS 就是跑在 TLS（Transport Layer Security）之上的普通 HTTP。配置好之后，对 API 的业务代码几乎是透明的——它看到的还是正常的请求和响应，只是这一切现在被加密和完整性保护包裹起来。开发环境可以用 <a href="https://mkcert.dev" target="_blank" rel="noopener">mkcert</a> 生成一个本机浏览器信任的证书：</p>
-    <pre class="plain"><code>mkcert -install
+    <pre class="plain"><code class="language-bash">mkcert -install
 mkcert -pkcs12 localhost   # 生成 localhost.p12，默认密码 changeit</code></pre>
 
     <div class="callout warn">
@@ -540,7 +541,7 @@ mkcert -pkcs12 localhost   # 生成 localhost.p12，默认密码 changeit</code>
 
     <h3>3.4.2 严格传输安全（HSTS）</h3>
     <p>API 通常不需要兼容"先访问 HTTP 再跳转 HTTPS"这种网页时代的老习惯——直接拒绝明文请求即可。如果确实有浏览器会直连你的 API，可以加一个 <code class="inline">Strict-Transport-Security</code> 响应头，告诉浏览器"以后任何时候都只准用 HTTPS 访问我"：</p>
-    <pre class="plain"><code>response.header("Strict-Transport-Security", "max-age=31536000");</code></pre>
+    <pre class="plain"><code class="language-java">response.header("Strict-Transport-Security", "max-age=31536000");</code></pre>
 
     <figure class="diagram">
       <svg viewBox="0 0 680 250" role="img" aria-label="启用 HTTPS 前后，同一 WiFi 下的攻击者能否窃听密码的对比图">
@@ -592,7 +593,7 @@ mkcert -pkcs12 localhost   # 生成 localhost.p12，默认密码 changeit</code>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/Main.java + 书中 3.4 节示例</div>
-        <pre><code>import static spark.Spark.secure;
+        <pre><code class="language-java">import static spark.Spark.secure;
 
 public class Main {
     public static void main(String... args) throws Exception {
@@ -611,7 +612,7 @@ public class Main {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">settings.py（TLS 通常由 nginx/Caddy 反向代理终止，Django 只负责重定向与 HSTS）</div>
-        <pre><code># settings.py
+        <pre><code class="language-python"># settings.py
 SECURE_SSL_REDIRECT = True          # 把 HTTP 请求 301 到 HTTPS
 SECURE_PROXY_SSL_HEADER = (
     "HTTP_X_FORWARDED_PROTO", "https")  # 信任反向代理传来的协议头
@@ -626,7 +627,7 @@ SECURE_HSTS_PRELOAD = True
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/index.ts（本地直接用 Node https；生产通常交给反向代理终止 TLS）</div>
-        <pre><code>import { Hono } from "hono";
+        <pre><code class="language-typescript">import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { secureHeaders } from "hono/secure-headers";
 import { readFileSync } from "node:fs";
@@ -656,7 +657,7 @@ serve({
 
     <p>Natter 把审计拆成两个过滤器：请求<strong>刚进来</strong>时先写一条记录（哪怕后面处理崩溃了，这条记录也在），请求<strong>处理完</strong>之后再写一条带状态码的记录，两条记录靠同一个 <code class="inline">audit_id</code> 关联起来。</p>
 
-    <pre class="plain"><code>CREATE TABLE audit_log(
+    <pre class="plain"><code class="language-sql">CREATE TABLE audit_log(
     audit_id INT NULL,
     method VARCHAR(10) NOT NULL,
     path VARCHAR(100) NOT NULL,
@@ -716,7 +717,7 @@ GRANT SELECT, INSERT ON audit_log TO natter_api_user;</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/controller/AuditController.java</div>
-        <pre><code>public void auditRequestStart(Request request, Response response) {
+        <pre><code class="language-java">public void auditRequestStart(Request request, Response response) {
     database.withVoidTransaction(tx -> {
         var auditId = database.findUniqueLong(
                 "SELECT NEXT VALUE FOR audit_id_seq");
@@ -747,7 +748,7 @@ afterAfter(auditController::auditRequestEnd);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">natter/middleware.py（放在认证中间件之后）</div>
-        <pre><code>import uuid
+        <pre><code class="language-python">import uuid
 from django.utils import timezone
 from .models import AuditLog
 
@@ -783,7 +784,7 @@ MIDDLEWARE = [
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/audit.ts</div>
-        <pre><code>import type { Context, Next } from "hono";
+        <pre><code class="language-typescript">import type { Context, Next } from "hono";
 import { db } from "../db";
 
 export async function auditLog(c: Context, next: Next) {
@@ -827,7 +828,7 @@ app.use("*", auditLog); // 认证之后，访问控制之前</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/controller/UserController.java</div>
-        <pre><code>public void requireAuthentication(Request request, Response response) {
+        <pre><code class="language-java">public void requireAuthentication(Request request, Response response) {
     if (request.attribute("subject") == null) {
         response.header("WWW-Authenticate",
                 "Basic realm=\"/\", charset=\"UTF-8\"");
@@ -841,7 +842,7 @@ post("/spaces", spaceController::createSpace);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/views.py（DRF，IsAuthenticated 自动带上 WWW-Authenticate）</div>
-        <pre><code>from rest_framework.views import APIView
+        <pre><code class="language-python">from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 
 class SpaceListView(APIView):
@@ -855,7 +856,7 @@ class SpaceListView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/auth.ts</div>
-        <pre><code>export function requireAuthentication(c: Context, next: Next) {
+        <pre><code class="language-typescript">export function requireAuthentication(c: Context, next: Next) {
   if (!c.get("subject")) {
     c.header("WWW-Authenticate", 'Basic realm="/", charset="UTF-8"');
     return c.body(null, 401);
@@ -876,7 +877,7 @@ app.post("/spaces", createSpace);</code></pre>
       <p>不要因为"方便"就把所有权限都给所有人。<strong>最小权限原则</strong>（Principle of Least Authority）要求：每个用户或进程只应该拥有完成本职工作所必需的最少权限。权限给多了会增加破坏面，给少了用户又会想方设法绕过限制——这正是我们接下来要看到的越权漏洞的根源。</p>
     </div>
 
-    <pre class="plain"><code>CREATE TABLE permissions(
+    <pre class="plain"><code class="language-sql">CREATE TABLE permissions(
     space_id INT NOT NULL REFERENCES spaces(space_id),
     user_id VARCHAR(30) NOT NULL REFERENCES users(user_id),
     perms VARCHAR(3) NOT NULL,
@@ -931,7 +932,7 @@ GRANT SELECT, INSERT ON permissions TO natter_api_user;</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/controller/UserController.java + Main.java</div>
-        <pre><code>public Filter requirePermission(String method, String permission) {
+        <pre><code class="language-java">public Filter requirePermission(String method, String permission) {
     return (request, response) -> {
         if (!method.equalsIgnoreCase(request.requestMethod())) {
             return;
@@ -968,7 +969,7 @@ delete("/spaces/:spaceId/messages/:msgId",
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/permissions.py（自定义 DRF permission_classes）</div>
-        <pre><code>from rest_framework.permissions import BasePermission
+        <pre><code class="language-python">from rest_framework.permissions import BasePermission
 from .models import Permission
 
 class HasSpacePermission(BasePermission):
@@ -998,7 +999,7 @@ class MessageDeleteView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/acl.ts</div>
-        <pre><code>import type { Context, Next } from "hono";
+        <pre><code class="language-typescript">import type { Context, Next } from "hono";
 import { db } from "../db";
 
 export function requirePermission(
@@ -1099,7 +1100,7 @@ app.delete("/spaces/:spaceId/messages/:msgId", deletePost);</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch03/src/main/java/com/manning/apisecurityinaction/controller/SpaceController.java + Main.java</div>
-        <pre><code>// SpaceController.java
+        <pre><code class="language-java">// SpaceController.java
 public JSONObject addMember(Request request, Response response) {
     var json = new JSONObject(request.body());
     var spaceId = Long.parseLong(request.params(":spaceId"));
@@ -1127,7 +1128,7 @@ post("/spaces/:spaceId/members", spaceController::addMember);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/views.py</div>
-        <pre><code>import re
+        <pre><code class="language-python">import re
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from .models import Permission
@@ -1151,7 +1152,7 @@ class AddMemberView(APIView):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/spaces.ts</div>
-        <pre><code>// 关键修复：要求 rwd 而不是只要 r，只有所有者/版主能添加成员
+        <pre><code class="language-typescript">// 关键修复：要求 rwd 而不是只要 r，只有所有者/版主能添加成员
 app.use("/spaces/:spaceId/members", requirePermission("POST", "rwd"));
 
 app.post("/spaces/:spaceId/members", async (c) => {
@@ -1197,6 +1198,9 @@ app.post("/spaces/:spaceId/members", async (c) => {
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

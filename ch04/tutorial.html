@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 4 章：基于会话 Cookie 的认证 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 <style>
   .diagram text { font-size: 12px; }
@@ -55,7 +56,7 @@
       <p>标准的 HTML <code class="inline">&lt;form&gt;</code> 只会把数据编码成 <code class="inline">application/x-www-form-urlencoded</code> 或 <code class="inline">multipart/form-data</code>，Natter API 只认 JSON。所以浏览器必须用 JavaScript 拦截表单提交，自己拼一个 JSON 请求发出去，而不能让浏览器用默认方式直接提交表单。</p>
     </div>
 
-    <pre class="plain"><code>// src/main/resources/public/natter.js（书中 4.1 节，创建空间的最初版本）
+    <pre class="plain"><code class="language-javascript">// src/main/resources/public/natter.js（书中 4.1 节，创建空间的最初版本）
 const apiUrl = 'https://localhost:4567';
 
 function createSpace(name, owner) {
@@ -99,7 +100,7 @@ function processFormSubmit(e) {
     <p>
       解决办法很简单：让 Natter API 服务器自己把这些 HTML/JS 文件也一起托管出去，这样页面和 API 就是同一个源了。Spark 只需要一行配置：
     </p>
-    <pre class="plain"><code>// Main.java —— 必须是 main 方法的第一行
+    <pre class="plain"><code class="language-java">// Main.java —— 必须是 main 方法的第一行
 Spark.staticFiles.location("/public");</code></pre>
     <p>这样 <code class="inline">src/main/resources/public/</code> 目录下的文件就能通过 <code class="inline">https://localhost:4567/natter.html</code> 直接访问，和 API 同源。</p>
 
@@ -194,7 +195,7 @@ Spark.staticFiles.location("/public");</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch04/src/main/java/.../token/TokenStore.java</div>
-        <pre><code>public interface TokenStore {
+        <pre><code class="language-java">public interface TokenStore {
 
     String create(Request request, Token token);
     Optional&lt;Token&gt; read(Request request, String tokenId);
@@ -216,7 +217,7 @@ Spark.staticFiles.location("/public");</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/tokens.py（教学示例：抽象 token 存储）</div>
-        <pre><code>from abc import ABC, abstractmethod
+        <pre><code class="language-python">from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -242,7 +243,7 @@ class TokenStore(ABC):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/tokens/store.ts</div>
-        <pre><code>export interface Token {
+        <pre><code class="language-typescript">export interface Token {
   expiry: Date;
   username: string;
   attributes: Record&lt;string, string&gt;;
@@ -269,7 +270,7 @@ export interface TokenStore {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch04/src/main/java/.../controller/TokenController.java（login 方法）</div>
-        <pre><code>public JSONObject login(Request request, Response response) {
+        <pre><code class="language-java">public JSONObject login(Request request, Response response) {
     // subject 属性是 UserController 的 HTTP Basic 过滤器
     // 验证密码通过后设置的
     String subject = request.attribute("subject");
@@ -288,7 +289,7 @@ export interface TokenStore {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/views.py</div>
-        <pre><code>from django.contrib.auth import authenticate, login
+        <pre><code class="language-python">from django.contrib.auth import authenticate, login
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.contrib.auth.decorators import login_not_required
@@ -313,7 +314,7 @@ def session_login(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/sessions.ts</div>
-        <pre><code>import { Hono } from "hono";
+        <pre><code class="language-typescript">import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 import { setCookie } from "hono/cookie";
 
@@ -440,7 +441,7 @@ export default sessions;</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch04/src/main/java/.../token/CookieTokenStore.java（create 方法节选）</div>
-        <pre><code>@Override
+        <pre><code class="language-java">@Override
 public String create(Request request, Token token) {
 
     var session = request.session(false);
@@ -458,7 +459,7 @@ public String create(Request request, Token token) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/views.py</div>
-        <pre><code>from django.contrib.auth import login as django_login
+        <pre><code class="language-python">from django.contrib.auth import login as django_login
 
 def session_login(request, user):
     # Django 的 login() 内部已经会调用 cycle_key()，
@@ -470,7 +471,7 @@ def session_login(request, user):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/tokens/cookieStore.ts</div>
-        <pre><code>async function create(c: Context, token: Token): Promise&lt;string&gt; {
+        <pre><code class="language-typescript">async function create(c: Context, token: Token): Promise&lt;string&gt; {
   const oldSessionId = getCookie(c, "session_id");
   if (oldSessionId) {
     await db.delete(sessions).where(eq(sessions.id, oldSessionId));
@@ -513,7 +514,7 @@ def session_login(request, user):
     </div>
 
     <p>curl 实测登录响应长这样，可以直接看到这些属性：</p>
-    <pre class="plain"><code>HTTP/1.1 201 Created
+    <pre class="plain"><code class="language-http">HTTP/1.1 201 Created
 Set-Cookie: JSESSIONID=node0hwk7s0nq6wvppqh0wbs0cha91.node0;Path=/;Secure;HttpOnly
 Content-Type: application/json
 
@@ -527,7 +528,7 @@ Content-Type: application/json
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch04/src/main/java/.../Main.java（启用 HTTPS，Jetty 据此默认加 Secure/HttpOnly）</div>
-        <pre><code>public static void main(String... args) throws Exception {
+        <pre><code class="language-java">public static void main(String... args) throws Exception {
     Spark.staticFiles.location("/public");
     secure("localhost.p12", "changeit", null, null);   // 启用 HTTPS
     ...
@@ -538,7 +539,7 @@ Content-Type: application/json
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">settings.py</div>
-        <pre><code>SESSION_COOKIE_NAME = "__Host-session"
+        <pre><code class="language-python">SESSION_COOKIE_NAME = "__Host-session"
 SESSION_COOKIE_HTTPONLY = True     # 对应 HttpOnly
 SESSION_COOKIE_SECURE = True       # 对应 Secure，仅 HTTPS 发送
 SESSION_COOKIE_SAMESITE = "Strict" # 对应 SameSite=Strict
@@ -548,7 +549,7 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = True
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/tokens/cookieStore.ts</div>
-        <pre><code>import { setCookie } from "hono/cookie";
+        <pre><code class="language-typescript">import { setCookie } from "hono/cookie";
 
 setCookie(c, "__Host-session", sessionId, {
   httpOnly: true,     // 对应 HttpOnly
@@ -564,7 +565,7 @@ setCookie(c, "__Host-session", sessionId, {
     <p>
       光签发 Cookie 还不够，还得有一道过滤器在每个请求进来时检查它：如果 Cookie 有效且没过期，就把用户名写进请求的 <code class="inline">subject</code> 属性，后面的权限检查才能认出"这是谁"。
     </p>
-    <pre class="plain"><code>// TokenController.java（4.3.3 节的初版，暂时还没有 CSRF 防护——见下一节）
+    <pre class="plain"><code class="language-java">// TokenController.java（4.3.3 节的初版，暂时还没有 CSRF 防护——见下一节）
 public void validateToken(Request request, Response response) {
     // WARNING: 这里还没有校验 CSRF token，见 4.4 节
     tokenStore.read(request, null).ifPresent(token -> {
@@ -577,7 +578,7 @@ public void validateToken(Request request, Response response) {
 // Main.java: before(userController::authenticate);
 //            before(tokenController::validateToken);</code></pre>
     <p>接好之后，用 curl 模拟一次完整流程：登录拿 Cookie，再带着 Cookie 去访问受保护的接口：</p>
-    <pre class="plain"><code>$ curl -i -c /tmp/cookies -u test:password \
+    <pre class="plain"><code class="language-bash">$ curl -i -c /tmp/cookies -u test:password \
     -H 'Content-Type: application/json' -X POST https://localhost:4567/sessions
 HTTP/1.1 201 Created
 Set-Cookie: JSESSIONID=node0l2q3fc024gw8wq4wp961y5rk0.node0;Path=/;Secure;HttpOnly
@@ -784,7 +785,7 @@ $ curl -b /tmp/cookies -H 'Content-Type: application/json' \
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch04/src/main/java/.../token/CookieTokenStore.java（read 方法，含哈希校验）</div>
-        <pre><code>@Override
+        <pre><code class="language-java">@Override
 public Optional&lt;Token&gt; read(Request request, String tokenId) {
     var session = request.session(false);
     if (session == null) {
@@ -818,7 +819,7 @@ static byte[] sha256(String tokenId) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">middleware/csrf.py（教学示例：贴近书中"哈希绑定 session"的写法）</div>
-        <pre><code># Django 内置 CsrfViewMiddleware 默认是"随机值双重提交"，
+        <pre><code class="language-python"># Django 内置 CsrfViewMiddleware 默认是"随机值双重提交"，
 # 可以打开 CSRF_USE_SESSIONS=True 让 token 与 session 绑定；
 # 这里手写一个哈希绑定版本，逻辑上对应 Java 的 CookieTokenStore：
 import hashlib, hmac, base64
@@ -843,7 +844,7 @@ class HashDoubleSubmitCsrfMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/middleware/csrf.ts</div>
-        <pre><code>import { createHash, timingSafeEqual } from "node:crypto";
+        <pre><code class="language-typescript">import { createHash, timingSafeEqual } from "node:crypto";
 import { getCookie } from "hono/cookie";
 import type { MiddlewareHandler } from "hono";
 
@@ -872,7 +873,7 @@ export const csrfDoubleSubmit: MiddlewareHandler = async (c, next) => {
     </div>
 
     <p>实测一下：不带 <code class="inline">X-CSRF-Token</code> 头的请求会被当成未认证直接拒绝——哪怕 Cookie 是对的：</p>
-    <pre class="plain"><code>$ curl -i -b /tmp/cookies -H 'Content-Type: application/json' \
+    <pre class="plain"><code class="language-bash">$ curl -i -b /tmp/cookies -H 'Content-Type: application/json' \
     -d '{"name":"test space","owner":"test"}' https://localhost:4567/spaces
 HTTP/1.1 401 Unauthorized
 
@@ -892,14 +893,14 @@ HTTP/1.1 201 Created
       <p>如果 API 在 401 响应里带了 <code class="inline">WWW-Authenticate: Basic</code> 头，浏览器会自动弹出丑陋的原生登录框，盖过我们自己做的登录页。解决办法是 <code class="inline">requireAuthentication</code> 只管 <code class="inline">halt(401)</code>，<strong>不要</strong>再设置这个响应头。</p>
     </div>
 
-    <pre class="plain"><code>// UserController.java
+    <pre class="plain"><code class="language-java">// UserController.java
 public void requireAuthentication(Request request, Response response) {
     if (request.attribute("subject") == null) {
         halt(401);   // 故意不设置 WWW-Authenticate，避免触发浏览器原生登录框
     }
 }</code></pre>
 
-    <pre class="plain"><code>// src/main/resources/public/login.js（真实项目文件，节选）
+    <pre class="plain"><code class="language-javascript">// src/main/resources/public/login.js（真实项目文件，节选）
 function login(username, password) {
     let credentials = 'Basic ' + btoa(username + ':' + password);
 
@@ -924,7 +925,7 @@ function login(username, password) {
 }</code></pre>
 
     <p>主页 <code class="inline">natter.js</code> 在发起业务请求前，从 <code class="inline">document.cookie</code> 里手动解析出 <code class="inline">csrfToken</code>，塞进 <code class="inline">X-CSRF-Token</code> 请求头；如果服务器返回 401，就跳回登录页：</p>
-    <pre class="plain"><code>// src/main/resources/public/natter.js（真实项目文件，节选）
+    <pre class="plain"><code class="language-javascript">// src/main/resources/public/natter.js（真实项目文件，节选）
 function getCookie(cookieName) {
     var cookieValue = document.cookie.split(';')
         .map(item => item.split('=')
@@ -974,7 +975,7 @@ function createSpace(name, owner) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch04/src/main/java/.../token/CookieTokenStore.java + controller/TokenController.java</div>
-        <pre><code>// CookieTokenStore.java
+        <pre><code class="language-java">// CookieTokenStore.java
 @Override
 public void revoke(Request request, String tokenId) {
     var session = request.session(false);
@@ -1003,7 +1004,7 @@ public JSONObject logout(Request request, Response response) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">accounts/views.py</div>
-        <pre><code>from django.contrib.auth import logout as django_logout
+        <pre><code class="language-python">from django.contrib.auth import logout as django_logout
 from django.views.decorators.http import require_http_methods
 
 @require_http_methods(["DELETE"])
@@ -1021,7 +1022,7 @@ def session_logout(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/sessions.ts</div>
-        <pre><code>import { deleteCookie, getCookie } from "hono/cookie";
+        <pre><code class="language-typescript">import { deleteCookie, getCookie } from "hono/cookie";
 
 sessions.delete("/sessions", async (c) => {
   const tokenId = c.req.header("X-CSRF-Token");
@@ -1043,7 +1044,7 @@ sessions.delete("/sessions", async (c) => {
     </div>
 
     <p>登出后再用旧 Cookie 请求会直接被拒绝，因为服务器端已经查不到这个 session 了：</p>
-    <pre class="plain"><code>$ curl -i -b /tmp/cookies -H 'X-CSRF-Token: gB7Ci...' -X DELETE https://localhost:4567/sessions
+    <pre class="plain"><code class="language-bash">$ curl -i -b /tmp/cookies -H 'X-CSRF-Token: gB7Ci...' -X DELETE https://localhost:4567/sessions
 HTTP/1.1 200 OK
 
 $ curl -i -b /tmp/cookies -H 'X-CSRF-Token: gB7Ci...' \
@@ -1080,6 +1081,9 @@ HTTP/1.1 401 Unauthorized</code></pre>
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

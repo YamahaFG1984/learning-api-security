@@ -38,6 +38,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    if (window.hljs) window.hljs.highlightAll();
     setDiagramMinWidth();
     var saved = null;
     try { saved = localStorage.getItem("apisec-tutorial-lang"); } catch (e) {}

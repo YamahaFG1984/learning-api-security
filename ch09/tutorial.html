@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 9 章：基于能力的安全与 Macaroon · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -79,7 +80,7 @@
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/controller/CapabilityController.java（节选）</div>
-        <pre><code>public URI createUri(Request request, String path, String perms,
+        <pre><code class="language-java">public URI createUri(Request request, String path, String perms,
                      Duration expiryDuration) {
     var subject = (String) request.attribute("subject");
     var token = new Token(now().plus(expiryDuration), subject);
@@ -111,7 +112,7 @@ public void lookupPermissions(Request request, Response response) {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">capabilities/tokens.py + capabilities/middleware.py（教学示例）</div>
-        <pre><code># capabilities/tokens.py
+        <pre><code class="language-python"># capabilities/tokens.py
 from django.utils.crypto import get_random_string
 from django.utils import timezone
 
@@ -147,7 +148,7 @@ class CapabilityMiddleware:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/capabilities.ts + src/middleware/capability.ts（教学示例）</div>
-        <pre><code>// src/routes/capabilities.ts
+        <pre><code class="language-typescript">// src/routes/capabilities.ts
 // toBase64Url 是几行的小工具函数，把字节数组编码成 URL-safe base64，这里从略
 function createCapabilityUri(c: Context, path: string, perms: string, ttlMs: number) {
   const tokenId = toBase64Url(crypto.getRandomValues(new Uint8Array(20)))
@@ -186,7 +187,7 @@ export async function lookupPermissions(c: Context, next: Next) {
     </div>
 
     <p>创建一个空间之后，返回的响应会长这样——注意 <code class="inline">uri</code> 字段已经不是简单的 <code class="inline">/spaces/1</code>，而是带着 <code class="inline">access_token</code> 的完整能力 URI：</p>
-    <pre class="plain"><code>$ curl -X POST -H 'Content-Type: application/json' \
+    <pre class="plain"><code class="language-bash">$ curl -X POST -H 'Content-Type: application/json' \
     -d '{"name":"test","owner":"demo"}' \
     -u demo:password https://localhost:4567/spaces
 
@@ -248,7 +249,7 @@ export async function lookupPermissions(c: Context, next: Next) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/controller/SpaceController.java（节选：createSpace）</div>
-        <pre><code>var expiry = Duration.ofDays(100000);
+        <pre><code class="language-java">var expiry = Duration.ofDays(100000);
 var uri = capabilityController.createUri(request,
         "/spaces/" + spaceId, "rwd", expiry);
 var messagesUri = capabilityController.createUri(request,
@@ -270,7 +271,7 @@ return new JSONObject()
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/serializers.py（教学示例）</div>
-        <pre><code># DRF 默认的 HyperlinkedModelSerializer 生成的链接基于资源主键
+        <pre><code class="language-python"># DRF 默认的 HyperlinkedModelSerializer 生成的链接基于资源主键
 # （本质还是"身份 + ACL"思路）。要把权限编码进链接本身，
 # 需要自己写 SerializerMethodField，逻辑对应 Java 的 createUri。
 from datetime import timedelta
@@ -306,7 +307,7 @@ class SpaceSerializer(serializers.Serializer):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/spaces.ts（教学示例）</div>
-        <pre><code>app.post('/spaces', requireAuth, async (c) => {
+        <pre><code class="language-typescript">app.post('/spaces', requireAuth, async (c) => {
   const { name, owner } = await c.req.json()
   const spaceId = await insertSpace(name, owner)
 
@@ -366,7 +367,7 @@ class SpaceSerializer(serializers.Serializer):
     </figure>
 
     <p>因为这份模板脚本本身不含任何敏感信息，且对所有能力 URI 都通用，浏览器可以把它长期缓存下来，之后打开新的能力链接就不用再多走一次"先拿模板"的请求了。项目里实际的 <code class="inline">capability.js</code> 就是这么写的：</p>
-    <pre class="plain"><code>function getCap(url, callback) {
+    <pre class="plain"><code class="language-javascript">function getCap(url, callback) {
     let capUrl = new URL(url);
     let token = capUrl.hash.substring(1);
     capUrl.hash = '';
@@ -452,7 +453,7 @@ class SpaceSerializer(serializers.Serializer):
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/controller/CapabilityController.java（节选：share）</div>
-        <pre><code>public JSONObject share(Request request, Response response) {
+        <pre><code class="language-java">public JSONObject share(Request request, Response response) {
     var json = new JSONObject(request.body());
 
     var capUri = URI.create(json.getString("uri"));
@@ -484,7 +485,7 @@ class SpaceSerializer(serializers.Serializer):
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/views.py（教学示例）</div>
-        <pre><code>from urllib.parse import urlparse, parse_qs
+        <pre><code class="language-python">from urllib.parse import urlparse, parse_qs
 from django.http import JsonResponse
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_POST
@@ -518,7 +519,7 @@ def share_capability(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/capabilities.ts（教学示例）</div>
-        <pre><code>app.post('/capabilities', requireAuth, async (c) => {
+        <pre><code class="language-typescript">app.post('/capabilities', requireAuth, async (c) => {
   const body = await c.req.json() as { uri: string; user: string; perms?: string }
   const parsed = new URL(body.uri)
   const path = parsed.pathname
@@ -666,7 +667,7 @@ def share_capability(request):
     </figure>
 
     <p>校验时反过来做：服务器手里有原始密钥 <code class="inline">K</code>，从 identifier 开始重新算一遍这条链——每遇到一个 caveat，就用刚算出来的 tag 当 key 继续往下算，最后比较算出来的 tag 和 macaroon 自带的 tag 是否一致。书里给出了这段校验逻辑的最小实现（<code class="inline">jmacaroons</code> 库内部做的就是同一件事，你不需要自己写这段代码，这里贴出来只是为了让你看懂它到底在干什么）：</p>
-    <pre class="plain"><code>private boolean verify(String id, List&lt;String&gt; caveats, byte[] tag) throws Exception {
+    <pre class="plain"><code class="language-java">private boolean verify(String id, List&lt;String&gt; caveats, byte[] tag) throws Exception {
     var hmac = Mac.getInstance("HmacSHA256");
     hmac.init(macKey);
     var computed = hmac.doFinal(id.getBytes(UTF_8));
@@ -695,7 +696,7 @@ def share_capability(request):
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch09/src/main/java/com/manning/apisecurityinaction/token/MacaroonTokenStore.java（节选）</div>
-        <pre><code>public class MacaroonTokenStore implements SecureTokenStore {
+        <pre><code class="language-java">public class MacaroonTokenStore implements SecureTokenStore {
     private final TokenStore delegate;
     private final Key macKey;
 
@@ -743,7 +744,7 @@ def share_capability(request):
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">capabilities/macaroon_store.py（教学示例 · 使用 pymacaroons）</div>
-        <pre><code># pip install pymacaroons —— 真实存在、和 jmacaroons 同源算法的 Python 库
+        <pre><code class="language-python"># pip install pymacaroons —— 真实存在、和 jmacaroons 同源算法的 Python 库
 from pymacaroons import Macaroon, Verifier
 from django.conf import settings
 
@@ -773,7 +774,7 @@ def revoke_macaroon(serialized: str):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/lib/macaroon.ts（教学示例 · 手写 HMAC 链）</div>
-        <pre><code>// JS/TS 生态里没有像 jmacaroons、pymacaroons 那样成熟、维护良好的
+        <pre><code class="language-typescript">// JS/TS 生态里没有像 jmacaroons、pymacaroons 那样成熟、维护良好的
 // macaroon 库（社区里有 Canonical 维护的 js-macaroon，但文档和生态都薄弱得多），
 // 这里按 9.3.2 节同样的算法手写一个等价实现——核心就是反复做 HMAC-SHA256。
 import { createHmac, timingSafeEqual } from 'node:crypto'
@@ -826,7 +827,7 @@ export function readMacaroon(
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch09/.../token/MacaroonTokenStore.java（SinceVerifier）+ ch09/.../CaveatAppender.java</div>
-        <pre><code>private static class SinceVerifier implements GeneralCaveatVerifier {
+        <pre><code class="language-java">private static class SinceVerifier implements GeneralCaveatVerifier {
     private final Request request;
 
     private SinceVerifier(Request request) {
@@ -860,7 +861,7 @@ public class CaveatAppender {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">capabilities/caveat_checks.py + caveat_appender.py（教学示例）</div>
-        <pre><code># capabilities/caveat_checks.py —— 供 macaroon_store.py 里的 Verifier 调用
+        <pre><code class="language-python"># capabilities/caveat_checks.py —— 供 macaroon_store.py 里的 Verifier 调用
 from datetime import datetime, timezone, timedelta
 
 def check_expiry_caveat(caveat: str) -> bool:
@@ -889,7 +890,7 @@ print(m.serialize())</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/lib/macaroon-client.ts（教学示例 · 浏览器端追加 caveat）</div>
-        <pre><code>// 浏览器里用 Web Crypto（SubtleCrypto）实现同样的"用旧 tag 当新 key"，
+        <pre><code class="language-typescript">// 浏览器里用 Web Crypto（SubtleCrypto）实现同样的"用旧 tag 当新 key"，
 // 完全不需要接触服务器的密钥，几行代码就能做到，和 Java 版的 CaveatAppender 对应。
 async function hmacKeyFromTag(tag: Uint8Array): Promise&lt;CryptoKey&gt; {
   return crypto.subtle.importKey(
@@ -966,7 +967,7 @@ export async function addCaveat(mac: SerializedMacaroon, caveat: string) {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">书中示例 · jmacaroons 的第三方 caveat API（未包含在本项目源码里）</div>
-        <pre><code>var secret = new byte[32];
+        <pre><code class="language-java">var secret = new byte[32];
 new SecureRandom().nextBytes(secret);
 
 macaroon = MacaroonsBuilder.modify(macaroon)
@@ -975,7 +976,7 @@ macaroon = MacaroonsBuilder.modify(macaroon)
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">capabilities/third_party.py（教学示例 · 使用 pymacaroons）</div>
-        <pre><code># 加 caveat 这一端（API 或客户端）：
+        <pre><code class="language-python"># 加 caveat 这一端（API 或客户端）：
 secret = secrets.token_bytes(32)
 m.add_third_party_caveat("https://auth.example.com", secret, caveat_id)
 
@@ -993,7 +994,7 @@ verifier.verify(m, MAC_KEY, discharge_macaroons=[bound])</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/lib/third-party-caveat.ts（示意，非完整实现）</div>
-        <pre><code>// 手写第三方 caveat 相当于自己重新实现一套公钥加密协议，
+        <pre><code class="language-typescript">// 手写第三方 caveat 相当于自己重新实现一套公钥加密协议，
 // 这里只画出结构，说明它比第一方 caveat 复杂得多，不建议直接照抄到生产环境。
 type ThirdPartyCaveat = {
   location: string   // 去哪个第三方服务核实
@@ -1042,6 +1043,9 @@ async function addThirdPartyCaveat(mac: SerializedMacaroon, tp: ThirdPartyCaveat
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>

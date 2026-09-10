@@ -21,9 +21,9 @@
   --c-warn: #d97706;     /* 警告 / 中间人 / 网关 */
   --c-idp: #0891b2;      /* 认证服务器 / IdP / AS */
 
-  --code-bg: #0f1420;
-  --code-text: #dbe4ff;
-  --code-dim: #7a88ad;
+  --code-bg: #272822;
+  --code-text: #f8f8f2;
+  --code-dim: #75715e;
 
   --radius: 10px;
   --shadow: 0 1px 2px rgba(20, 25, 40, .04), 0 8px 24px -12px rgba(20, 25, 40, .12);
@@ -42,8 +42,8 @@
     --accent: #5b8dfb;
     --accent-dim: #1c2a4d;
     --accent-ink: #8fb4ff;
-    --code-bg: #0a0d16;
-    --code-text: #dbe4ff;
+    --code-bg: #272822;
+    --code-text: #f8f8f2;
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.5);
   }
 }
@@ -217,7 +217,7 @@ figure.diagram figcaption {
 .code-compare .tab-bar {
   display: flex;
   gap: 2px;
-  background: #060810;
+  background: #1e1f1c;
   padding: 6px 6px 0;
 }
 .code-compare .tab-btn {
@@ -255,6 +255,10 @@ figure.diagram figcaption {
   color: var(--code-text);
   white-space: pre;
 }
+
+/* Monokai 主题自带内边距和底色，交还给外层 pre 统一控制 */
+.code-compare pre code.hljs,
+pre.plain code.hljs { padding: 0; background: transparent; overflow-x: visible; }
 
 pre.plain {
   background: var(--code-bg);

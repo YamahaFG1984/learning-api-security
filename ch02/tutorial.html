@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>第 2 章：安全的 API 开发 · API 安全实战教程</title>
+<link rel="stylesheet" href="../assets/vendor/highlightjs/monokai.min.css">
 <link rel="stylesheet" href="../assets/tutorial.css">
 </head>
 <body>
@@ -112,7 +113,7 @@
 
     <p>Natter 的数据库只有两张表：<code class="inline">spaces</code>（社交空间）和 <code class="inline">messages</code>（消息）。</p>
 
-    <pre class="plain"><code>CREATE TABLE spaces(
+    <pre class="plain"><code class="language-sql">CREATE TABLE spaces(
     space_id INT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     owner VARCHAR(30) NOT NULL
@@ -193,7 +194,7 @@ CREATE UNIQUE INDEX space_name_idx ON spaces(name);</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/java/.../controller/SpaceController.java</div>
-        <pre><code>public class SpaceController {
+        <pre><code class="language-java">public class SpaceController {
 
   private final Database database;
 
@@ -226,7 +227,7 @@ CREATE UNIQUE INDEX space_name_idx ON spaces(name);</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/models.py + spaces/views.py（教学示例）</div>
-        <pre><code># spaces/models.py
+        <pre><code class="language-python"># spaces/models.py
 from django.db import models
 
 class Space(models.Model):
@@ -257,7 +258,7 @@ def create_space(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/spaces.ts（教学示例）</div>
-        <pre><code>import { Hono } from 'hono'
+        <pre><code class="language-typescript">import { Hono } from 'hono'
 import { db } from '../db'
 import { spaces } from '../db/schema'
 
@@ -337,7 +338,7 @@ export default app</code></pre>
     </figure>
 
     <p>启动服务后可以用 curl 试一下：</p>
-    <pre class="plain"><code>$ curl -i -d '{"name": "test space", "owner": "demo"}' \
+    <pre class="plain"><code class="language-bash">$ curl -i -d '{"name": "test space", "owner": "demo"}' \
   http://localhost:4567/spaces
 
 HTTP/1.1 201 Created
@@ -363,7 +364,7 @@ Content-Type: application/json
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/java/.../Main.java（节选）</div>
-        <pre><code>import static spark.Spark.*;
+        <pre><code class="language-java">import static spark.Spark.*;
 
 public class Main {
   public static void main(String... args) throws Exception {
@@ -385,7 +386,7 @@ public class Main {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/urls.py + natter/urls.py（教学示例）</div>
-        <pre><code># spaces/urls.py
+        <pre><code class="language-python"># spaces/urls.py
 from django.urls import path
 from . import views
 
@@ -405,7 +406,7 @@ urlpatterns = [
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/index.ts（教学示例）</div>
-        <pre><code>import { Hono } from 'hono'
+        <pre><code class="language-typescript">import { Hono } from 'hono'
 import spaceRoutes from './routes/spaces'
 import moderatorRoutes from './routes/moderator'
 
@@ -423,7 +424,7 @@ export default app</code></pre>
       我们刚才写的 <code class="inline">createSpace</code> 是修好之后的版本。原书第一版故意写了一个有漏洞的
       版本，用字符串拼接的方式构造 SQL：
     </p>
-    <pre class="plain"><code>// ⚠️ 危险写法，千万不要抄进真实项目！
+    <pre class="plain"><code class="language-java">// ⚠️ 危险写法，千万不要抄进真实项目！
 database.updateUnique(
     "INSERT INTO spaces(space_id, name, owner) " +
         "VALUES(" + spaceId + ", '" + spaceName +
@@ -440,7 +441,7 @@ database.updateUnique(
     </div>
 
     <p>用一个单引号试探一下，服务器直接报 500：</p>
-    <pre class="plain"><code>$ curl -i -d '{"name": "test'"'"'space", "owner": "demo"}' \
+    <pre class="plain"><code class="language-bash">$ curl -i -d '{"name": "test'"'"'space", "owner": "demo"}' \
   http://localhost:4567/spaces
 HTTP/1.1 500 Server Error
 {"error":"internal server error"}
@@ -498,7 +499,7 @@ org.h2.jdbc.JdbcSQLException: Syntax error in SQL statement
     </figure>
 
     <p>之后任何人再创建空间都会报错，因为表已经不存在了：</p>
-    <pre class="plain"><code>org.h2.jdbc.JdbcSQLException: Table "SPACES" not found;</code></pre>
+    <pre class="plain"><code class="language-plaintext">org.h2.jdbc.JdbcSQLException: Table "SPACES" not found;</code></pre>
 
     <h3>2.4.1 用预处理语句（PreparedStatement）防止注入</h3>
     <p>
@@ -558,7 +559,7 @@ org.h2.jdbc.JdbcSQLException: Syntax error in SQL statement
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/java/.../controller/SpaceController.java</div>
-        <pre><code>return database.withTransaction(tx -&gt; {
+        <pre><code class="language-java">return database.withTransaction(tx -&gt; {
   var spaceId = database.findUniqueLong(
       "SELECT NEXT VALUE FOR space_id_seq;");
 
@@ -578,7 +579,7 @@ org.h2.jdbc.JdbcSQLException: Syntax error in SQL statement
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/views.py（教学示例）</div>
-        <pre><code># 方式一：用 Django ORM，天然参数化，等价于 Java 的 PreparedStatement
+        <pre><code class="language-python"># 方式一：用 Django ORM，天然参数化，等价于 Java 的 PreparedStatement
 space = Space.objects.create(name=space_name, owner=owner)
 # ORM 底层生成的 SQL 大致是：
 #   INSERT INTO spaces (name, owner) VALUES (%s, %s)
@@ -597,7 +598,7 @@ with connection.cursor() as cursor:
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/spaces.ts（教学示例，better-sqlite3 / drizzle-orm）</div>
-        <pre><code>// 方式一：better-sqlite3 的参数化查询
+        <pre><code class="language-typescript">// 方式一：better-sqlite3 的参数化查询
 const insertSpace = db.prepare(
   'INSERT INTO spaces (space_id, name, owner) VALUES (?, ?, ?)'
 )
@@ -638,12 +639,12 @@ await db.insert(spaces).values({
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/resources/schema.sql + Main.java</div>
-        <pre><code>-- schema.sql：建完表之后，创建一个只有必要权限的账号
+        <pre><code class="language-sql">-- schema.sql：建完表之后，创建一个只有必要权限的账号
 CREATE USER natter_api_user PASSWORD 'password';
 GRANT SELECT, INSERT ON spaces, messages TO natter_api_user;
 GRANT DELETE ON messages TO natter_api_user;
 -- 注意：从未 GRANT 任何 DROP / ALTER 权限</code></pre>
-        <pre><code>// Main.java：先用管理员账号建表，再切换到受限账号
+        <pre><code class="language-java">// Main.java：先用管理员账号建表，再切换到受限账号
 var datasource = JdbcConnectionPool.create(
     "jdbc:h2:mem:natter", "natter", "password");
 var database = Database.forDataSource(datasource);
@@ -655,12 +656,12 @@ database = Database.forDataSource(datasource);  // 之后请求都用受限账�
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">db/init/01-roles.sql + settings.py（教学示例）</div>
-        <pre><code>-- db/init/01-roles.sql（Postgres 初始化脚本，容器启动时执行）
+        <pre><code class="language-sql">-- db/init/01-roles.sql（Postgres 初始化脚本，容器启动时执行）
 CREATE USER natter_api_user WITH PASSWORD '...';
 REVOKE ALL ON spaces, messages FROM PUBLIC;
 GRANT SELECT, INSERT ON spaces, messages TO natter_api_user;
 GRANT DELETE ON messages TO natter_api_user;</code></pre>
-        <pre><code># settings.py：运行时连接用受限账号
+        <pre><code class="language-python"># settings.py：运行时连接用受限账号
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -677,7 +678,7 @@ DATABASES = {
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/db/index.ts（教学示例）</div>
-        <pre><code>// 迁移用 drizzle-kit + 管理员连接串：
+        <pre><code class="language-typescript">// 迁移用 drizzle-kit + 管理员连接串：
 //   DATABASE_URL=postgres://natter_admin:...@db/natter drizzle-kit push
 
 // 运行时用受限账号的连接串，权限同上面的 01-roles.sql
@@ -743,7 +744,7 @@ export const db = drizzle(sql)</code></pre>
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/java/.../controller/SpaceController.java</div>
-        <pre><code>public JSONObject createSpace(Request request, Response response) {
+        <pre><code class="language-java">public JSONObject createSpace(Request request, Response response) {
   var json = new JSONObject(request.body());
 
   var spaceName = json.getString("name");
@@ -761,7 +762,7 @@ export const db = drizzle(sql)</code></pre>
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">spaces/forms.py + spaces/views.py（教学示例）</div>
-        <pre><code># spaces/forms.py
+        <pre><code class="language-python"># spaces/forms.py
 from django import forms
 from django.core.validators import RegexValidator
 
@@ -790,7 +791,7 @@ def create_space(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/routes/spaces.ts（教学示例，zod）</div>
-        <pre><code>import { z } from 'zod'
+        <pre><code class="language-typescript">import { z } from 'zod'
 import { HTTPException } from 'hono/http-exception'
 
 const createSpaceSchema = z.object({
@@ -852,7 +853,7 @@ app.post('/spaces', async (c) =&gt; {
       浏览器把表单字段拼成看起来像 JSON 的纯文本，绕过"浏览器不能直接发 <code class="inline">application/json</code>
       表单"的限制：
     </p>
-    <pre class="plain"><code>&lt;!DOCTYPE html&gt;
+    <pre class="plain"><code class="language-xml">&lt;!DOCTYPE html&gt;
 &lt;html&gt;
 &lt;body&gt;
 &lt;form id="test" action="http://localhost:4567/spaces"
@@ -966,7 +967,7 @@ document.getElementById("test").submit();
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/java/.../Main.java</div>
-        <pre><code>before(((request, response) -&gt; {
+        <pre><code class="language-java">before(((request, response) -&gt; {
     if (request.requestMethod().equals("POST") &amp;&amp;
     !"application/json".equals(request.contentType())) {
         halt(415, new JSONObject().put(
@@ -988,7 +989,7 @@ afterAfter((request, response) -&gt; {
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">core/middleware.py + settings.py（教学示例）</div>
-        <pre><code># core/middleware.py
+        <pre><code class="language-python"># core/middleware.py
 from django.http import JsonResponse
 
 class EnforceJsonContentTypeMiddleware:
@@ -1010,7 +1011,7 @@ class EnforceJsonContentTypeMiddleware:
             "default-src 'none'; frame-ancestors 'none'; sandbox"
         )
         return response</code></pre>
-        <pre><code># settings.py：Django 内置的同类安全设置（覆盖大部分场景）
+        <pre><code class="language-python"># settings.py：Django 内置的同类安全设置（覆盖大部分场景）
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "core.middleware.EnforceJsonContentTypeMiddleware",
@@ -1021,7 +1022,7 @@ X_FRAME_OPTIONS = "DENY"</code></pre>
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/index.ts（教学示例，hono/secure-headers）</div>
-        <pre><code>import { secureHeaders } from 'hono/secure-headers'
+        <pre><code class="language-typescript">import { secureHeaders } from 'hono/secure-headers'
 import { HTTPException } from 'hono/http-exception'
 
 app.use('*', secureHeaders({
@@ -1062,7 +1063,7 @@ app.use('*', async (c, next) =&gt; {
       </div>
       <div class="tab-panel" data-lang="java">
         <div class="file-path">ch02/src/main/java/.../Main.java</div>
-        <pre><code>internalServerError(new JSONObject()
+        <pre><code class="language-java">internalServerError(new JSONObject()
     .put("error", "internal server error").toString());
 notFound(new JSONObject()
     .put("error", "not found").toString());
@@ -1083,12 +1084,12 @@ private static void badRequest(Exception ex,
       </div>
       <div class="tab-panel" data-lang="python">
         <div class="file-path">settings.py + core/views.py（教学示例）</div>
-        <pre><code># settings.py
+        <pre><code class="language-python"># settings.py
 DEBUG = False  # 生产环境必须关闭，否则默认错误页会泄露完整堆栈
 handler400 = "core.views.bad_request"
 handler404 = "core.views.not_found"
 handler500 = "core.views.server_error"</code></pre>
-        <pre><code># core/views.py
+        <pre><code class="language-python"># core/views.py
 from django.http import JsonResponse
 
 def bad_request(request, exception):
@@ -1103,7 +1104,7 @@ def server_error(request):
       </div>
       <div class="tab-panel" data-lang="js">
         <div class="file-path">src/index.ts（教学示例）</div>
-        <pre><code>import { HTTPException } from 'hono/http-exception'
+        <pre><code class="language-typescript">import { HTTPException } from 'hono/http-exception'
 
 app.onError((err, c) =&gt; {
   if (err instanceof HTTPException) {
@@ -1172,6 +1173,9 @@ app.notFound((c) =&gt; c.json({ error: 'not found' }, 404))</code></pre>
     </div>
   </main>
 </div>
+<script src="../assets/vendor/highlightjs/highlight.min.js"></script>
+<script src="../assets/vendor/highlightjs/http.min.js"></script>
+<script src="../assets/vendor/highlightjs/dockerfile.min.js"></script>
 <script src="../assets/tutorial.js"></script>
 </body>
 </html>
